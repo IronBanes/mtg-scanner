@@ -14,7 +14,7 @@ test('loads legacy data with default settings and persists only cards in use', (
     recent: [{ cardId: 'scanned' }],
     decks: [{ id: 'deck', name: 'My deck', cards: [{ cardId: 'decked', qty: 1, board: 'main' }] }],
   })) });
-  assert.deepEqual(json(a.state().settings), { dest: 'none', sound: true, exact: false });
+  assert.deepEqual(json(a.state().settings), { dest: 'none', sound: true, exact: false, searchOwned: false });
   a.call('addTo', 'collection', 'owned', false, 2);
   a.flush();
   const data = JSON.parse(a.stored.get(storageKey));
@@ -298,6 +298,200 @@ test('auto-scan needs consecutive reads and only adds the same card again after 
     a.element('#autoBtn').onclick();
     a.flush();
   }
+});
+
+test('shopping list counts only main and commander, groups printings, and prices the missing copies', () => {
+  const a = app();
+  a.call('cache', card());
+  a.call('cache', card('alt-print', { prices: { usd: '1.00', usd_foil: '2.00' } }));
+  a.call('cache', card('island', { name: 'Island', oracle_id: 'island-oracle', prices: { usd: '0.25', usd_foil: '0.50' } }));
+  a.call('cache', card('opt', { name: 'Opt', oracle_id: 'opt-oracle', prices: { usd: '0.25', usd_foil: '0.75' } }));
+  a.call('addTo', 'collection', 'alt-print', false, 1); // any printing counts toward the same card identity
+  const d = a.call('createDeck', 'Shop');
+  a.call('addTo', d.id, 'sol-ring', false, 2, 'main');   // first entry: nonfoil, prices the row
+  a.call('addTo', d.id, 'alt-print', true, 1, 'main');  // same identity: need 2 + 1, have 1 -> 2 missing
+  a.call('addTo', d.id, 'island', false, 3, 'commander'); // commander counts
+  a.call('addTo', d.id, 'opt', false, 2, 'side');        // sideboard is ignored
+  a.call('addTo', d.id, 'opt', false, 9, 'maybe');       // maybe is ignored
+  a.call('addTo', d.id, 'island', true, 1, 'maybe');
+  assert.deepEqual(json(a.call('shoppingList', d)), [
+    { cardId: 'island', name: 'Island', foil: false, need: 3, have: 0, missing: 3, unit: 0.25, total: 0.75 },
+    { cardId: 'sol-ring', name: 'Sol Ring', foil: false, need: 3, have: 1, missing: 2, unit: 2.5, total: 5 },
+  ]);
+  // the first entry's foil flag prices the row (foil $0.50, not normal $0.25)
+  assert.deepEqual(json(a.call('shoppingList', { cards: [
+    { cardId: 'island', foil: true, qty: 2, board: 'main' },
+  ] })), [
+    { cardId: 'island', name: 'Island', foil: true, need: 2, have: 0, missing: 2, unit: 0.5, total: 1 },
+  ]);
+  // owning everything (any printing) yields an empty list
+  a.call('addTo', 'collection', 'sol-ring', true, 2);
+  a.call('addTo', 'collection', 'island', false, 3);
+  assert.deepEqual(json(a.call('shoppingList', d)), []);
+  assert.equal(a.call('shoppingText', [
+    { missing: 2, name: 'Sol Ring', total: 10 },
+    { missing: 1, name: 'Island', total: 0.5 },
+  ]), '2 Sol Ring\n1 Island\n\nTotal: $10.50');
+});
+
+test('the deck shopping-list modal copies a store-ready list and exports only the missing copies', () => {
+  const a = app();
+  a.call('cache', card());
+  a.call('cache', card('opt', { name: 'Opt', oracle_id: 'opt-oracle', prices: { usd: '0.25', usd_foil: '0.75' } }));
+  const d = a.call('createDeck', 'Buy these');
+  a.call('addTo', d.id, 'sol-ring', false, 2);
+  a.call('addTo', d.id, 'opt', true, 1);
+  a.eval(`openDeckId = ${JSON.stringify(d.id)}`);
+  a.call('renderDeckDetail');
+  assert.ok(a.element('#deckDetail').innerHTML.includes('id="deckShop"'));
+  a.element('#deckShop').onclick();
+  const modal = a.element('#modalBody').innerHTML;
+  assert.match(modal, /Shopping list/);
+  assert.match(modal, /2× Sol Ring/);
+  assert.match(modal, /need 2 · own 0/);
+  assert.match(modal, /\$5\.00/); // 2 missing normal Sol Rings
+  assert.match(modal, /1× Opt/);
+  assert.match(modal, /need 1 · own 0/);
+  assert.match(modal, /\$0\.75/); // the foil entry's price
+  assert.match(modal, /Total/);
+  assert.match(modal, /3 cards to buy/); // copies, not rows
+  assert.match(modal, /\$5\.75/);
+  a.eval('navigator.clipboard = { writeText: async (t) => { __copied = t; } }');
+  a.element('#shopCopy').onclick();
+  assert.equal(a.eval('__copied'), '1 Opt\n2 Sol Ring\n\nTotal: $5.75'); // sorted by name
+  // Export CSV maps each row to { cardId, qty: missing, foil}: Count is what you must buy
+  const csv = a.call('toCsv', a.call('shoppingList', d).map((r) => ({ cardId: r.cardId, qty: r.missing, foil: r.foil })));
+  const [head, optRow, solRow] = csv.split('\r\n');
+  assert.equal(head.split(',')[0], 'Count');
+  assert.equal(optRow, '1,Opt,Commander 2021,C21,263,foil,,uncommon,Artifact,0.75,0.75,opt'); // no board in a shopping row
+  assert.equal(solRow, '2,Sol Ring,Commander 2021,C21,263,,,uncommon,Artifact,2.50,5.00,sol-ring');
+});
+
+test('a sticky toast has no auto-hide timer and comes back after a normal toast', () => {
+  const a = app();
+  const toast = () => a.element('#toast');
+  a.call('offerUpdate', { postMessage: () => {}, state: 'installed' });
+  assert.ok(toast().classList.contains('show'));
+  assert.match(toast().innerHTML, /A new version is ready/);
+  assert.match(toast().innerHTML, /aria-label="Dismiss"/);
+  assert.ok(toast().classList.contains('sticky'), 'sticky notice sits under the top bar, clear of the scan buttons');
+  assert.throws(() => a.advance(2200), /expected a pending timer/, 'a sticky toast leaves no auto-hide timer');
+  a.call('toast', 'Added 1× Sol Ring'); // a normal toast replaces it on screen without losing it
+  assert.match(toast().innerHTML, /Added 1× Sol Ring/);
+  assert.ok(!toast().innerHTML.includes('A new version is ready'));
+  assert.ok(!toast().classList.contains('sticky'), 'normal toasts stay at the bottom');
+  a.advance(2200); // the normal toast's timer brings the sticky notice back
+  assert.match(toast().innerHTML, /A new version is ready/);
+  assert.ok(toast().classList.contains('show'));
+  assert.throws(() => a.advance(2200), /expected a pending timer/, 'the restored sticky toast has no timer either');
+  toast().querySelector('button[aria-label="Dismiss"]').onclick(); // × clears the pending sticky
+  assert.ok(!toast().classList.contains('show'));
+  a.call('toast', 'Added 1× Sol Ring');
+  a.advance(2200);
+  assert.ok(!toast().classList.contains('show'), 'no sticky toast is brought back after ×');
+  a.call('offerUpdate', { postMessage: () => {}, state: 'installed' });
+  assert.ok(toast().classList.contains('show'));
+  a.element('button').onclick(); // the Reload action also clears the pending sticky
+  assert.ok(!toast().classList.contains('show'));
+  a.call('toast', 'Added 1× Sol Ring');
+  a.advance(2200);
+  assert.ok(!toast().classList.contains('show'));
+});
+
+test('tapping Reload posts SKIP_WAITING, or reloads directly once the worker is already active', () => {
+  const posted = [];
+  const a = app();
+  a.call('offerUpdate', { postMessage: (m) => posted.push(m), state: 'installed' });
+  a.element('button').onclick();
+  assert.deepEqual(posted, ['SKIP_WAITING']);
+  assert.equal(a.reloads(), 0, 'an installed worker is skipped, the controllerchange reload handles it');
+  a.call('offerUpdate', { postMessage: (m) => posted.push(m), state: 'activated' });
+  a.element('button').onclick();
+  assert.deepEqual(posted, ['SKIP_WAITING', 'SKIP_WAITING']);
+  assert.equal(a.reloads(), 1, 'another tab already switched: reload directly');
+  a.call('offerUpdate', { postMessage: (m) => posted.push(m), state: 'redundant' });
+  a.element('button').onclick();
+  assert.equal(a.reloads(), 2);
+});
+
+test('owned-only search keeps fetched pages, shows own-N badges, and re-renders without a new request', async () => {
+  const a = app({ route: (url) => {
+    if (url.searchParams.get('q') === 'Tundra') {
+      if (url.searchParams.get('page') === '2') return ok({ data: [card('tundra2', { name: 'Tundra', oracle_id: 'tundra-oracle' })], has_more: false });
+      return ok({ data: [card('tundra1', { name: 'Tundra', oracle_id: 'tundra-oracle' })], has_more: true, next_page: 'https://api.scryfall.com/cards/search?page=2&q=Tundra' });
+    }
+    return ok({
+      data: [card('near', { name: 'Sol Ring Replica', oracle_id: 'replica-oracle' }), card(), card('owned-print', { name: 'Sol Ring', oracle_id: 'sol-ring-oracle' })],
+      has_more: true, next_page: 'https://api.scryfall.com/cards/search?page=2&q=Sol+Ring',
+    });
+  } });
+  a.call('addTo', 'collection', 'owned-print', false, 3);
+  const results = () => a.element('#searchResults').innerHTML;
+  const shown = () => [...results().matchAll(/data-open="([^"]+)"/g)].map((m) => m[1]);
+  await a.call('runSearch', 'Sol Ring');
+  assert.deepEqual(shown(), ['sol-ring', 'owned-print', 'near']);
+  assert.equal([...results().matchAll(/class="own">own (\d+)/g)].map((m) => m[1]).join(), '3,3', 'own 3 on each owned printing');
+  // owned-only renders only owned cards, re-rendering the fetched results without a new request
+  a.element('#searchOwned').checked = true;
+  a.element('#searchOwned').onchange({ target: { checked: true } });
+  assert.ok(a.state().settings.searchOwned);
+  assert.deepEqual(shown(), ['sol-ring', 'owned-print']);
+  assert.equal(a.requests.length, 1);
+  a.element('#searchOwned').checked = false;
+  a.element('#searchOwned').onchange({ target: { checked: false } });
+  assert.ok(!a.state().settings.searchOwned);
+  assert.deepEqual(shown(), ['sol-ring', 'owned-print', 'near']);
+  assert.equal(a.requests.length, 1);
+  // a search with no owned cards says so, while Load more stays available until Scryfall runs out
+  a.element('#searchOwned').checked = true;
+  a.element('#searchOwned').onchange({ target: { checked: true } });
+  await a.call('runSearch', 'Tundra');
+  assert.match(results(), /None of these results are in your collection/);
+  assert.ok(!a.element('#moreBtn').classList.contains('hidden'), 'more pages exist');
+  await a.element('#moreBtn').onclick(); // page 2: none of it is owned either
+  assert.match(results(), /None of these results are in your collection/);
+  assert.ok(a.element('#moreBtn').classList.contains('hidden'), 'no more pages: Load more hides');
+  assert.equal(a.requests.length, 3);
+});
+
+test('review: an owned deck shows no shopping buttons, and search badges refresh after adding a card', async () => {
+  const a = app({ route: () => ok({ data: [card()], has_more: false }) });
+  a.call('cache', card());
+  const d = a.call('createDeck', 'Owned');
+  a.call('addTo', d.id, 'sol-ring', false, 1);
+  a.call('addTo', 'collection', 'sol-ring', false, 1);
+  a.call('showShoppingList', d);
+  assert.match(a.element('#modalBody').innerHTML, /You own every card in this deck/);
+  assert.ok(!a.element('#modalBody').innerHTML.includes('shopCopy'));
+  await a.call('runSearch', 'Sol Ring');
+  assert.match(a.element('#searchResults').innerHTML, /own 1/);
+  a.call('addTo', 'collection', 'sol-ring', false, 2);
+  a.call('renderAll');
+  assert.match(a.element('#searchResults').innerHTML, /own 3/);
+});
+
+test('a late response from an older search cannot replace or extend newer results', async () => {
+  let resolveOld;
+  const old = new Promise((resolve) => { resolveOld = resolve; });
+  const a = app({ route: (url) => (url.searchParams.get('q') === 'Old'
+    ? old
+    : ok({ data: [card()], has_more: false })) });
+  const first = a.call('runSearch', 'Old');
+  await a.call('runSearch', 'Sol Ring');
+  resolveOld(ok({ data: [card('stale', { name: 'Stale', oracle_id: 'stale-oracle' })], has_more: true, next_page: 'https://api.scryfall.com/cards/search?page=2&q=Old' }));
+  await first;
+  const html = a.element('#searchResults').innerHTML;
+  assert.match(html, /data-open="sol-ring"/);
+  assert.ok(!html.includes('stale'));
+  assert.equal(a.eval('searchNext'), null, 'the stale page cannot set Load more');
+});
+
+test('restoring state syncs the owned-only checkbox on the next render', () => {
+  const a = app();
+  a.element('#searchOwned').checked = false;
+  a.state().settings.searchOwned = true;
+  a.call('renderAll');
+  assert.equal(a.element('#searchOwned').checked, true);
 });
 
 test('a late card detail response cannot replace a newer card modal', async () => {

@@ -148,6 +148,7 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-siz
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px; margin-top: 10px; }
 .grid .gc { cursor: pointer; text-align: center; font-size: 12px; }
 .grid .gc img { width: 100%; border-radius: 5px; aspect-ratio: 488 / 680; object-fit: cover; background: var(--panel2); display: block; }
+.grid .gc .own { font-size: 11px; color: var(--muted); margin-top: 1px; }
 .grid .gc .gp { color: var(--accent); font-weight: 600; margin-top: 2px; }
 
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
@@ -163,6 +164,11 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-siz
 .decks li .dn { font-weight: 600; }
 .decks li .dv { color: var(--accent); font-weight: 700; font-variant-numeric: tabular-nums; }
 .deck-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.shop-total { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; margin-top: 8px; }
+.shop-total .n { font-size: 15px; }
+.shop-total .p b { color: var(--accent); font-size: 17px; }
+li.shop-total div, li.shop-total .meta .s { display: block; }
+li.shop-total .meta .n, li.shop-total .meta .s { text-align: left; }
 .deck-head h2 { margin: 0; font-size: 19px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .section-title { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 16px 0 4px; display: flex; justify-content: space-between; }
 
@@ -199,7 +205,11 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-siz
   transition: opacity .2s, transform .2s; z-index: 30; max-width: 90vw; text-align: center;
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
-.toast button { margin-left: 10px; background: none; border: 0; color: var(--accent); font-weight: 700; cursor: pointer; }
+.toast button { margin-left: 10px; background: none; border: 0; color: var(--accent); font-weight: 700; cursor: pointer; padding: 6px 8px; }
+.toast button[aria-label="Dismiss"] { color: var(--muted); font-weight: 400; font-size: 18px; line-height: 1; margin-left: 2px; }
+/* the sticky update notice sits under the top bar so it never covers the scan buttons */
+.toast.sticky { bottom: auto; top: calc(64px + var(--safe-t)); transform: translateX(-50%) translateY(-20px); }
+.toast.sticky.show { transform: translateX(-50%) translateY(0); }
 
 /* ---------- deck insights ---------- */
 .deck-tabs { display: flex; margin: 6px 0 12px; }
