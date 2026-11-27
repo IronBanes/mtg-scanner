@@ -14,8 +14,12 @@ self.addEventListener('install', (e) => {
 });
 self.addEventListener('message', (e) => { if (e.data === 'SKIP_WAITING') self.skipWaiting(); });
 self.addEventListener('activate', (e) => {
+  // Keep this release and the one before it: a tab still running the previous release can keep
+  // loading its own ?v= files until it reloads. Older releases are removed.
+  const rel = (k) => Number(k.slice('mtgscan-r'.length)) || 0;
   e.waitUntil(caches.keys()
-    .then((ks) => Promise.all(ks.filter((k) => k.startsWith('mtgscan') && k !== CACHE && k !== 'mtgscan-ocr').map((k) => caches.delete(k))))
+    .then((ks) => Promise.all(ks.filter((k) => k.startsWith('mtgscan-r')).sort((x, y) => rel(y) - rel(x))
+      .filter((k) => k !== CACHE).slice(1).map((k) => caches.delete(k))))
     .then(() => self.clients.claim()));
 });
 self.addEventListener('fetch', (e) => {
@@ -33,8 +37,12 @@ self.addEventListener('fetch', (e) => {
     return;
   }
   if (url.origin !== location.origin) return; // Scryfall API & images: always live
-  e.respondWith(caches.open(CACHE).then(async (c) => {
-    const key = e.request.mode === 'navigate' ? './' : e.request;
-    return (await c.match(key, { ignoreSearch: e.request.mode === 'navigate' })) || fetch(e.request);
-  }));
+  e.respondWith((async () => {
+    if (e.request.mode === 'navigate') {
+      const c = await caches.open(CACHE);
+      return (await c.match('./')) || fetch(e.request);
+    }
+    // versioned files are matched by exact URL in whichever release cached them
+    return (await caches.match(e.request)) || fetch(e.request);
+  })());
 });

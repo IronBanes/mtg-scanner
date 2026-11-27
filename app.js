@@ -994,9 +994,11 @@ function init() {
   if (todo.length && navigator.onLine) refreshPrices(todo).then(renderAll).catch(() => {});
 
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    // every open copy of the app reloads when a new release takes over, not just the one that tapped Reload
+    const hadController = !!navigator.serviceWorker.controller;
     let reloading = false;
-    navigator.serviceWorker.addEventListener('controllerchange', () => { if (reloading) location.reload(); });
-    const offer = (w) => toast('A new version is ready', 'Reload', () => { reloading = true; w.postMessage('SKIP_WAITING'); });
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloading) { reloading = true; location.reload(); } });
+    const offer = (w) => toast('A new version is ready', 'Reload', () => w.postMessage('SKIP_WAITING'));
     navigator.serviceWorker.register('sw.js').then((reg) => {
       if (reg.waiting && navigator.serviceWorker.controller) offer(reg.waiting);
       reg.addEventListener('updatefound', () => {
