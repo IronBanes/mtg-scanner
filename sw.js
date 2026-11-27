@@ -4,23 +4,33 @@
 // so a failed download can never mix old and new files.
 const VERSION = '3';
 const CACHE = 'mtgscan-r' + VERSION;
+const COMPLETE = '/__release-complete__';
 const SHELL = ['./', 'index.html', `style.css?v=${VERSION}`, `app.js?v=${VERSION}`, 'manifest.webmanifest',
   'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
   // No skipWaiting here: the new release waits until old pages are gone (or the user taps Reload),
   // so a page from the previous release is never switched to this worker mid-load.
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' })))));
+  // all files or nothing; a release cache counts only once it holds the COMPLETE marker,
+  // and a failed install removes its partial cache so it can't be mistaken for a release
+  e.waitUntil(caches.open(CACHE)
+    .then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' }))).then(() => c.put(COMPLETE, new Response('ok'))))
+    .catch((err) => caches.delete(CACHE).then(() => { throw err; })));
 });
 self.addEventListener('message', (e) => { if (e.data === 'SKIP_WAITING') self.skipWaiting(); });
 self.addEventListener('activate', (e) => {
-  // Keep this release and the one before it: a tab still running the previous release can keep
-  // loading its own ?v= files until it reloads. Older releases are removed.
+  // Keep this release and the newest COMPLETE release before it: a tab still running the previous
+  // release can keep loading its own ?v= files until it reloads. Everything else is removed.
   const rel = (k) => Number(k.slice('mtgscan-r'.length)) || 0;
-  e.waitUntil(caches.keys()
-    .then((ks) => Promise.all(ks.filter((k) => k.startsWith('mtgscan-r')).sort((x, y) => rel(y) - rel(x))
-      .filter((k) => k !== CACHE).slice(1).map((k) => caches.delete(k))))
-    .then(() => self.clients.claim()));
+  e.waitUntil((async () => {
+    const releases = (await caches.keys()).filter((k) => k.startsWith('mtgscan-r') && k !== CACHE).sort((x, y) => rel(y) - rel(x));
+    let kept = null;
+    for (const k of releases) {
+      if (!kept && (await (await caches.open(k)).match(COMPLETE))) { kept = k; continue; }
+      await caches.delete(k);
+    }
+    await self.clients.claim();
+  })());
 });
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
