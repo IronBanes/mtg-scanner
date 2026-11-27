@@ -28,3 +28,10 @@ The service worker caches each release as one unit. On every deploy, bump `VERSI
 **and** the matching `?v=` on `style.css` / `app.js` in `index.html`. Phones download the whole new
 release in the background and show a "new version — Reload" notice; it switches over only when
 you tap Reload or close the app, so a page never mixes two releases.
+
+## Your data is safe across updates
+Cards, decks and scans live in the phone's local storage, separate from the app files a deploy
+replaces. Saved data carries a `schema` number: when a release changes the data format it bumps
+`SCHEMA` in `app.js` and adds a migration, and the app keeps a safety copy before upgrading.
+If saved data can't be read, or was written by a newer version, the app won't overwrite it —
+the copy is available under Settings → Safety copies.

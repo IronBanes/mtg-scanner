@@ -51,7 +51,17 @@ function beep(freq = 880) {
 
 // ---------------------------------------------------------------- storage
 const STORE_KEY = 'mtgscan.v1';
+// Bump SCHEMA when the saved data's shape changes, and add a step to MIGRATIONS that upgrades
+// version n-1 data to n. Data is backed up before any upgrade and is never overwritten if it
+// can't be read, so app updates can't wipe a collection.
+const SCHEMA = 1;
+const MIGRATIONS = {
+  // 2: (d) => { ...upgrade d from schema 1 to 2...; return d; },
+};
+const BACKUP_PREFIX = 'mtgscan.safety.';
+let saveBlocked = null; // reason string when saving is paused to protect data we couldn't read
 const defaultState = () => ({
+  schema: SCHEMA,
   cards: {},          // scryfall id -> slim card data (cache)
   collection: [],     // {cardId, foil, qty, added}
   decks: [],          // {id, name, format, created, cards:[{cardId, foil, qty, board}]}
@@ -59,12 +69,38 @@ const defaultState = () => ({
   settings: { dest: 'none', sound: true, exact: true },
 });
 let state = defaultState();
+function keepSafetyCopy(tag, raw) {
+  try { localStorage.setItem(BACKUP_PREFIX + tag, raw); } catch (e) { console.warn('safety copy failed', e); }
+}
 function load() {
+  let raw = null;
+  try { raw = localStorage.getItem(STORE_KEY); } catch (e) { saveBlocked = 'storage unavailable'; return; }
+  if (!raw) return; // first run
+  let data;
   try {
-    const raw = localStorage.getItem(STORE_KEY);
-    if (raw) state = Object.assign(defaultState(), JSON.parse(raw));
-    state.settings = Object.assign(defaultState().settings, state.settings);
-  } catch (e) { console.warn('load failed', e); }
+    data = JSON.parse(raw);
+    const from = Number(data.schema) || 1;
+    if (from > SCHEMA) {
+      // written by a newer version of the app (e.g. this copy is an older cached release): read-only
+      saveBlocked = 'newer data';
+    } else if (from < SCHEMA) {
+      keepSafetyCopy('before-schema-' + (from + 1), raw);
+      for (let v = from + 1; v <= SCHEMA; v++) data = (MIGRATIONS[v] || ((d) => d))(data);
+      data.schema = SCHEMA;
+    }
+    validateBackup(data);
+  } catch (e) {
+    console.warn('load failed', e);
+    keepSafetyCopy('unreadable-' + new Date().toISOString().slice(0, 10), raw);
+    saveBlocked = 'unreadable';
+    return;
+  }
+  state = Object.assign(defaultState(), data);
+  state.settings = Object.assign(defaultState().settings, state.settings);
+}
+function warnIfBlocked() {
+  if (saveBlocked === 'newer data') toast('This copy of the app is older than your data, so changes won\u2019t be saved until it updates.', 'Reload', () => location.reload());
+  else if (saveBlocked) toast('Your saved data couldn\u2019t be read, so nothing will be overwritten. A copy is under Settings \u2192 Safety copies.', 'Settings', () => openSettings());
 }
 /** State minus cached cards nothing points at (search results, printing lists) — those are re-fetched when needed. */
 function persistable() {
@@ -75,6 +111,7 @@ function persistable() {
 }
 let saveTimer;
 function save() {
+  if (saveBlocked) return;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     try { localStorage.setItem(STORE_KEY, JSON.stringify(persistable())); }
@@ -848,6 +885,9 @@ async function doRefresh(ids) {
 }
 
 // ---------------------------------------------------------------- settings / backup
+function safetyKeys() {
+  try { return Object.keys(localStorage).filter((k) => k.startsWith(BACKUP_PREFIX)).sort(); } catch { return []; }
+}
 function openSettings() {
   const bytes = (localStorage.getItem(STORE_KEY) || '').length;
   showModal(`<h2>Settings & backup</h2>
@@ -856,11 +896,18 @@ function openSettings() {
     <h3>Backup</h3>
     <p class="muted">Your data lives only on this phone (${(bytes / 1024).toFixed(0)} KB). Export a backup now and then — it's one file you can save to iCloud Drive / Files.</p>
     <div class="row gap wrap"><button class="btn" id="bkExport">Export backup</button><label class="btn">Restore backup<input type="file" id="bkImport" accept=".json,application/json" hidden></label></div>
+    ${safetyKeys().length ? `<h3>Safety copies</h3><p class="muted">Saved automatically before data upgrades, or when saved data couldn't be read. Download one, then use Restore backup to load it.</p><div class="row gap wrap">${safetyKeys().map((k) => `<button class="btn small" data-safety="${esc(k)}">${esc(k.slice(BACKUP_PREFIX.length))}</button>`).join('')}</div>` : ''}
     <h3>Export</h3>
     <div class="row gap wrap"><button class="btn" id="exAll">All decks + collection CSV</button></div>
     <h3>Danger zone</h3>
     <div class="row gap wrap"><button class="btn danger" id="clrCache">Clear unused card cache</button></div>
     <p class="muted">Card data & prices from <a class="muted" href="https://scryfall.com" target="_blank" rel="noopener">Scryfall</a>. Not affiliated with Wizards of the Coast.</p>`);
+  $$('[data-safety]').forEach((b) => (b.onclick = () => {
+    const raw = localStorage.getItem(b.dataset.safety) || '';
+    let body = raw; try { body = JSON.stringify({ app: 'mtgscan', ...JSON.parse(raw) }); } catch {}
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([body], { type: 'application/json' }));
+    a.download = 'mtg-scanner-' + b.dataset.safety.slice(BACKUP_PREFIX.length) + '.json'; a.click();
+  }));
   $('#setSound').onchange = (e) => { state.settings.sound = e.target.checked; save(); };
   $('#bkExport').onclick = async () => {
     const file = new File([JSON.stringify({ app: 'mtgscan', v: 1, at: new Date().toISOString(), ...persistable() })], `mtg-scanner-backup-${new Date().toISOString().slice(0, 10)}.json`, { type: 'application/json' });
@@ -874,7 +921,7 @@ function openSettings() {
       if (data.app !== 'mtgscan') throw new Error('Not an MTG Scanner backup');
       validateBackup(data);
       if (!confirm('Replace everything on this phone with this backup?')) return;
-      const { app, v, at, ...rest } = data; state = Object.assign(defaultState(), rest); save(); hideModal(); renderAll(); toast('Backup restored');
+      const { app, v, at, ...rest } = data; state = Object.assign(defaultState(), rest, { schema: SCHEMA }); saveBlocked = null; save(); hideModal(); renderAll(); toast('Backup restored');
     } catch (err) { toast('Restore failed: ' + err.message); }
   };
   $('#exAll').onclick = () => {
@@ -940,6 +987,7 @@ document.addEventListener('click', (e) => {
 function init() {
   load();
   renderAll();
+  warnIfBlocked();
   $$('.tab').forEach((t) => (t.onclick = () => setView(t.dataset.view)));
   $('#settingsBtn').onclick = openSettings;
   $('#modalClose').onclick = hideModal;
