@@ -135,10 +135,20 @@ async function sf(path, opts = {}) {
   return data;
 }
 
+const LEGAL_FORMATS = ['commander', 'standard', 'pioneer', 'modern', 'legacy', 'vintage', 'pauper'];
 function slim(c) {
   const face = c.card_faces && c.card_faces[0];
   const img = c.image_uris || (face && face.image_uris) || {};
+  const oracle = c.oracle_text ?? (c.card_faces || []).map((f) => f.oracle_text || '').join('\n');
+  const frontType = (c.type_line || (face && face.type_line) || '').split(' // ')[0];
+  const keywords = c.keywords || [];
+  const legal = {};
+  if (c.legalities) LEGAL_FORMATS.forEach((f) => { if (c.legalities[f]) legal[f] = c.legalities[f]; });
   return {
+    keywords, produced: c.produced_mana || [], legal: c.legalities ? legal : undefined,
+    canCommand: /\bLegendary\b/.test(frontType) && (/\bCreature\b/.test(frontType) || /can be your commander/i.test(oracle)),
+    partner: keywords.includes('Partner') || /Partner with|Choose a Background/i.test(oracle) || /\bBackground\b/.test(frontType),
+    anyNumber: /deck can have any number of cards named/i.test(oracle),
     id: c.id, name: c.name, set: c.set, set_name: c.set_name, cn: c.collector_number,
     rarity: c.rarity, type: c.type_line || (face && face.type_line) || '',
     mana: c.mana_cost ?? (face && face.mana_cost) ?? '', cmc: c.cmc,
@@ -715,6 +725,7 @@ function renderDeckDetail() {
   $('#deckIndex').classList.toggle('hidden', !!d);
   $('#deckDetail').classList.toggle('hidden', !d);
   if (!d) return;
+  if (hand && hand.deckId !== d.id) hand = null;
   const t = deckTotals(d);
   let missingValue = 0;
   const need = {};
@@ -732,8 +743,10 @@ function renderDeckDetail() {
       <button class="btn small" id="deckText">Copy for Untap</button>
       <button class="btn small ghost" id="deckImport">Import list</button>
       <button class="btn small ghost" id="deckRefresh">Refresh prices</button>
-    </div>`;
-  BOARDS.forEach(([b, label]) => {
+    </div>${deckTabsHtml()}`;
+  if (deckTab === 'stats') html += statsHtml(d);
+  else if (deckTab === 'hand') html += handHtml(d);
+  else BOARDS.forEach(([b, label]) => {
     const rows = d.cards.filter((e) => e.board === b && state.cards[e.cardId]).sort((a, z) => state.cards[a.cardId].name.localeCompare(state.cards[z.cardId].name));
     if (!rows.length) return;
     const n = rows.reduce((s, e) => s + e.qty, 0), v = rows.reduce((s, e) => s + e.qty * unitPrice(state.cards[e.cardId], e.foil), 0);
@@ -744,8 +757,9 @@ function renderDeckDetail() {
         .replace('<li ', `<li data-foil="${e.foil ? 1 : 0}" data-board="${b}" `);
     }).join('') + '</ul>';
   });
-  if (!d.cards.length) html += `<p class="empty">Empty deck. Add cards from Search, scan them in, or import a list.</p>`;
+  if (!d.cards.length && deckTab === 'cards') html += `<p class="empty">Empty deck. Add cards from Search, scan them in, or import a list.</p>`;
   $('#deckDetail').innerHTML = html;
+  wireDeckTabs(d);
   $('#deckBack').onclick = () => { openDeckId = null; renderDecks(); };
   $('#deckAdd').onclick = () => { setView('search'); state.settings.searchDest = d.id; $('#searchInput').focus(); toast(`Tap a card, then Add → ${d.name}`); };
   $('#deckScan').onclick = () => { state.settings.dest = d.id; save(); renderDestSelect(); setView('scan'); };
