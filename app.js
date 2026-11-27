@@ -66,11 +66,18 @@ function load() {
     state.settings = Object.assign(defaultState().settings, state.settings);
   } catch (e) { console.warn('load failed', e); }
 }
+/** State minus cached cards nothing points at (search results, printing lists) — those are re-fetched when needed. */
+function persistable() {
+  const used = new Set([...state.collection, ...state.recent, ...state.decks.flatMap((d) => d.cards)].map((e) => e.cardId));
+  const cards = {};
+  used.forEach((id) => { if (state.cards[id]) cards[id] = state.cards[id]; });
+  return { ...state, cards };
+}
 let saveTimer;
 function save() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(persistable())); }
     catch (e) { toast('Could not save — storage full?'); }
   }, 150);
 }
@@ -398,9 +405,9 @@ function destLabel(dest) {
 function destOptions(selected, { includeNone = true } = {}) {
   let html = includeNone ? `<option value="none">Just scan — don't save</option>` : '';
   html += `<option value="collection">Collection</option>`;
-  state.decks.forEach((d) => (html += `<option value="${d.id}">Deck: ${esc(d.name)}</option>`));
+  state.decks.forEach((d) => (html += `<option value="${esc(d.id)}">Deck: ${esc(d.name)}</option>`));
   html += `<option value="__new">+ New deck…</option>`;
-  return html.replace(`value="${selected}"`, `value="${selected}" selected`);
+  return html.replace(`value="${esc(selected)}"`, `value="${esc(selected)}" selected`);
 }
 function renderDestSelect() {
   if (state.settings.dest !== 'none' && state.settings.dest !== 'collection' && !state.decks.some((d) => d.id === state.settings.dest)) state.settings.dest = 'none';
@@ -454,7 +461,7 @@ function showResult(card, ocrText) {
   const foil = foilOn(), dest = state.settings.dest;
   const el = $('#scanResult');
   el.innerHTML = `<div class="result">
-    <img src="${esc(card.thumb)}" alt="" data-open="${card.id}">
+    <img src="${esc(card.thumb)}" alt="" data-open="${esc(card.id)}">
     <div class="info">
       <h3>${esc(card.name)}</h3>
       <div class="muted">${esc(card.set_name)} · #${esc(card.cn)} · ${esc(card.rarity)}</div>
@@ -489,14 +496,14 @@ function manualEntry(prefill = '') {
 function cardRow(entry, { qtyControls, extra = '', sub = '' } = {}) {
   const c = state.cards[entry.cardId];
   if (!c) return '';
-  const unit = unitPrice(c, entry.foil), qty = entry.qty ?? 1;
-  return `<li data-id="${c.id}">
-    <img src="${esc(c.thumb)}" alt="" loading="lazy" data-open="${c.id}">
-    <div class="meta" data-open="${c.id}">
+  const unit = unitPrice(c, entry.foil), qty = Number(entry.qty ?? 1) || 0;
+  return `<li data-id="${esc(c.id)}">
+    <img src="${esc(c.thumb)}" alt="" loading="lazy" data-open="${esc(c.id)}">
+    <div class="meta" data-open="${esc(c.id)}">
       <div class="n">${esc(c.name)}${entry.foil ? '<span class="badge foil">FOIL</span>' : ''}${extra}</div>
       <div class="s">${esc(c.set.toUpperCase())} #${esc(c.cn)} · ${esc(c.set_name)}${sub}</div>
     </div>
-    ${qtyControls ? `<div class="qty"><button data-q="-1">−</button><b>${qty}</b><button data-q="1">+</button></div>` : ''}
+    ${qtyControls ? `<div class="qty"><button data-q="-1">−</button><b>${qty | 0}</b><button data-q="1">+</button></div>` : ''}
     <div class="p"><b>${money(unit * qty)}</b>${qty > 1 ? `<span>${money(unit)} ea</span>` : ''}</div>
   </li>`;
 }
@@ -543,7 +550,7 @@ async function runSearch(q, append = false) {
     r.data.forEach(cache);
     res.insertAdjacentHTML('beforeend', r.data.map((c) => {
       const s = state.cards[c.id];
-      return `<div class="gc" data-open="${s.id}"><img src="${esc(s.thumb)}" alt="${esc(s.name)}" loading="lazy"><div>${esc(s.name)}</div><div class="gp">${unitPrice(s) ? money(unitPrice(s)) : '—'}</div></div>`;
+      return `<div class="gc" data-open="${esc(s.id)}"><img src="${esc(s.thumb)}" alt="${esc(s.name)}" loading="lazy"><div>${esc(s.name)}</div><div class="gp">${unitPrice(s) ? money(unitPrice(s)) : '—'}</div></div>`;
     }).join(''));
     searchNext = r.has_more ? r.next_page : null;
     $('#moreBtn').classList.toggle('hidden', !searchNext);
@@ -556,10 +563,13 @@ async function runSearch(q, append = false) {
 
 // ---------------------------------------------------------------- card detail
 async function openCard(cardId, { afterAdd, defaultDest } = {}) {
+  const my = ++modalSeq; // a newer openCard or closing the popup makes this load stale
   let c = state.cards[cardId];
   showModal(`<p class="muted">Loading…</p>`);
   let full;
-  try { full = await sf('/cards/' + cardId); c = cache(full); } catch { if (!c) return showModal('<p>Could not load card.</p>'); }
+  try { full = await sf('/cards/' + encodeURIComponent(cardId)); c = cache(full); }
+  catch { if (my !== modalSeq) return; if (!c) return showModal('<p>Could not load card.</p>'); }
+  if (my !== modalSeq) return;
   const faces = full?.card_faces && !full.oracle_text ? full.card_faces : [full || {}];
   const oracle = faces.map((f) => [f.name && faces.length > 1 ? f.name + ' ' + (f.mana_cost || '') : '', f.type_line, f.oracle_text].filter(Boolean).join('\n')).join('\n\n');
   const owned = state.collection.filter((e) => state.cards[e.cardId]?.oracle_id === c.oracle_id).reduce((s, e) => s + e.qty, 0);
@@ -575,7 +585,7 @@ async function openCard(cardId, { afterAdd, defaultDest } = {}) {
       <div class="stat hl"><b>${c.prices.usd_foil || c.prices.usd_etched ? money(c.prices.usd_foil || c.prices.usd_etched) : '—'}</b><span>Foil</span></div>
       <div class="stat"><b>${owned}</b><span>You own</span></div>
     </div>
-    <label class="field"><span>Printing</span><select id="printSel"><option value="${c.id}">${esc(c.set_name)} (${esc(c.set.toUpperCase())}) #${esc(c.cn)}</option></select></label>
+    <label class="field"><span>Printing</span><select id="printSel"><option value="${esc(c.id)}">${esc(c.set_name)} (${esc(c.set.toUpperCase())}) #${esc(c.cn)}</option></select></label>
     <div class="form-grid">
       <label class="field full"><span>Add to</span><select id="addDest">${destOptions(dest0, { includeNone: false })}</select></label>
       <label class="field"><span>Quantity</span><input type="number" id="addQty" value="1" min="1" inputmode="numeric"></label>
@@ -601,14 +611,18 @@ async function openCard(cardId, { afterAdd, defaultDest } = {}) {
   if (c.prints_uri) {
     try {
       let url = c.prints_uri, prints = [];
-      while (url && prints.length < 350) { const r = await sf(url); prints.push(...r.data); url = r.has_more ? r.next_page : null; }
-      const sel = $('#printSel'); if (!sel) return;
+      while (url && prints.length < 350) {
+        const r = await sf(url); if (my !== modalSeq) return;
+        prints.push(...r.data); url = r.has_more ? r.next_page : null;
+      }
+      const sel = $('#printSel'); if (!sel || my !== modalSeq) return;
       prints.forEach((p) => (state.cards[p.id] ? Object.assign(state.cards[p.id], slim(p)) : (state.cards[p.id] = slim(p))));
       save();
-      sel.innerHTML = prints.filter((p) => !p.digital).map((p) => {
+      // hide digital-only versions, but always keep the one currently shown
+      sel.innerHTML = prints.filter((p) => !p.digital || p.id === c.id).map((p) => {
         const s = state.cards[p.id];
         const pr = s.prices.usd ? money(s.prices.usd) : s.prices.usd_foil ? money(s.prices.usd_foil) + ' foil' : 'no price';
-        return `<option value="${p.id}" ${p.id === c.id ? 'selected' : ''}>${esc(s.set_name)} (${esc(s.set.toUpperCase())}) #${esc(s.cn)} — ${pr}</option>`;
+        return `<option value="${esc(p.id)}" ${p.id === c.id ? 'selected' : ''}>${esc(s.set_name)} (${esc(s.set.toUpperCase())}) #${esc(s.cn)} — ${pr}</option>`;
       }).join('');
     } catch {}
   }
@@ -653,7 +667,7 @@ function ownedCount(oracleId) {
 function renderDecks() {
   $('#deckList').innerHTML = state.decks.length ? state.decks.map((d) => {
     const t = deckTotals(d);
-    return `<li data-deck="${d.id}"><div><div class="dn">${esc(d.name)}</div><div class="muted">${t.cards} cards · ${esc(d.format)}</div></div><div class="dv">${money(t.value)}</div></li>`;
+    return `<li data-deck="${esc(d.id)}"><div><div class="dn">${esc(d.name)}</div><div class="muted">${t.cards} cards · ${esc(d.format)}</div></div><div class="dv">${money(t.value)}</div></li>`;
   }).join('') : `<li class="empty" style="cursor:default;display:block">No decks yet.</li>`;
   $$('#deckList li[data-deck]').forEach((li) => (li.onclick = () => { openDeckId = li.dataset.deck; renderDeckDetail(); }));
   renderDeckDetail();
@@ -794,33 +808,33 @@ function parseList(text) {
 async function importList(text, dest, report) {
   const items = parseList(text);
   if (!items.length) return report('Nothing to import.');
-  let done = 0; const failed = [];
-  for (let i = 0; i < items.length; i += 75) {
-    const chunk = items.slice(i, i + 75);
-    const ids = chunk.map((x) => (x.set && x.cn ? { set: x.set, collector_number: x.cn } : x.set ? { name: x.name, set: x.set } : { name: x.name }));
-    report(`Looking up ${i + chunk.length} / ${items.length}…`);
-    let r;
-    try { r = await sf('/cards/collection', { method: 'POST', body: JSON.stringify({ identifiers: ids }) }); }
-    catch (e) { report('Error: ' + e.message); return; }
-    const found = r.data.map(cache);
-    // Scryfall returns found cards in order, omitting not_found ones — match them back up
-    const nf = new Set((r.not_found || []).map((x) => JSON.stringify(x)));
-    let fi = 0;
-    const retry = [];
-    chunk.forEach((it, k) => {
-      if (nf.has(JSON.stringify(ids[k]))) { retry.push(it); return; }
-      const c = found[fi++]; if (!c) return;
-      const b = ['main', 'side', 'commander', 'maybe'].includes(it.board) ? it.board : 'main';
-      addTo(dest, c.id, it.foil, it.qty, b); done += it.qty;
-    });
-    for (const it of retry) { // typos / odd spellings: let Scryfall's fuzzy match have a go
-      try {
-        const c = cache(await sf('/cards/named?fuzzy=' + encodeURIComponent(it.name)));
-        addTo(dest, c.id, it.foil, it.qty, ['main', 'side', 'commander', 'maybe'].includes(it.board) ? it.board : 'main');
-        done += it.qty;
-      } catch { failed.push(it.name); }
+  // Look everything up first; only add cards once every lookup has succeeded,
+  // so a network failure part-way leaves the list untouched and a retry can't double-add.
+  const plan = [], failed = [];
+  const boardOf = (it) => (['main', 'side', 'commander', 'maybe'].includes(it.board) ? it.board : 'main');
+  try {
+    for (let i = 0; i < items.length; i += 75) {
+      const chunk = items.slice(i, i + 75);
+      const ids = chunk.map((x) => (x.set && x.cn ? { set: x.set, collector_number: x.cn } : x.set ? { name: x.name, set: x.set } : { name: x.name }));
+      report(`Looking up ${i + chunk.length} / ${items.length}…`);
+      const r = await sf('/cards/collection', { method: 'POST', body: JSON.stringify({ identifiers: ids }) });
+      const found = r.data.map(cache);
+      // Scryfall returns found cards in order, omitting not_found ones — match them back up
+      const nf = new Set((r.not_found || []).map((x) => JSON.stringify(x)));
+      let fi = 0;
+      const retry = [];
+      chunk.forEach((it, k) => {
+        if (nf.has(JSON.stringify(ids[k]))) { retry.push(it); return; }
+        const c = found[fi++]; if (c) plan.push({ id: c.id, it });
+      });
+      for (const it of retry) { // typos / odd spellings: let Scryfall's fuzzy match have a go
+        try { plan.push({ id: cache(await sf('/cards/named?fuzzy=' + encodeURIComponent(it.name))).id, it }); }
+        catch (e) { if (e.status === 404) failed.push(it.name); else throw e; }
+      }
     }
-  }
+  } catch (e) { report('Error: ' + e.message + ' — nothing was imported, try again.'); return; }
+  let done = 0;
+  plan.forEach(({ id, it }) => { addTo(dest, id, it.foil, it.qty, boardOf(it)); done += it.qty; });
   renderAll();
   report(`Imported ${done} cards.${failed.length ? ' Not found: ' + failed.join(', ') : ''}`);
   if (!failed.length) { hideModal(); toast(`Imported ${done} cards into ${destLabel(dest)}`); }
@@ -849,7 +863,7 @@ function openSettings() {
     <p class="muted">Card data & prices from <a class="muted" href="https://scryfall.com" target="_blank" rel="noopener">Scryfall</a>. Not affiliated with Wizards of the Coast.</p>`);
   $('#setSound').onchange = (e) => { state.settings.sound = e.target.checked; save(); };
   $('#bkExport').onclick = async () => {
-    const file = new File([JSON.stringify({ app: 'mtgscan', v: 1, at: new Date().toISOString(), ...state })], `mtg-scanner-backup-${new Date().toISOString().slice(0, 10)}.json`, { type: 'application/json' });
+    const file = new File([JSON.stringify({ app: 'mtgscan', v: 1, at: new Date().toISOString(), ...persistable() })], `mtg-scanner-backup-${new Date().toISOString().slice(0, 10)}.json`, { type: 'application/json' });
     if (navigator.canShare && navigator.canShare({ files: [file] })) { try { await navigator.share({ files: [file] }); return; } catch (e) { if (e.name === 'AbortError') return; } }
     const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = file.name; a.click();
   };
@@ -858,6 +872,7 @@ function openSettings() {
     try {
       const data = JSON.parse(await f.text());
       if (data.app !== 'mtgscan') throw new Error('Not an MTG Scanner backup');
+      validateBackup(data);
       if (!confirm('Replace everything on this phone with this backup?')) return;
       const { app, v, at, ...rest } = data; state = Object.assign(defaultState(), rest); save(); hideModal(); renderAll(); toast('Backup restored');
     } catch (err) { toast('Restore failed: ' + err.message); }
@@ -874,9 +889,28 @@ function openSettings() {
   };
 }
 
+const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
+function validateBackup(d) {
+  const bad = (m) => { throw new Error('Backup looks damaged (' + m + ')'); };
+  if (!d.cards || typeof d.cards !== 'object' || Array.isArray(d.cards)) bad('cards');
+  for (const k of ['collection', 'decks', 'recent']) if (!Array.isArray(d[k])) bad(k);
+  const entry = (e, needQty) => {
+    if (!e || typeof e !== 'object' || !SAFE_ID.test(String(e.cardId))) bad('card id');
+    if (needQty && !(Number.isFinite(e.qty) && e.qty > 0)) bad('quantity');
+  };
+  d.collection.forEach((e) => entry(e, true));
+  d.recent.forEach((e) => entry(e, false));
+  d.decks.forEach((dk) => {
+    if (!dk || !SAFE_ID.test(String(dk.id)) || typeof dk.name !== 'string' || !Array.isArray(dk.cards)) bad('deck');
+    dk.cards.forEach((e) => entry(e, true));
+  });
+  Object.entries(d.cards).forEach(([k, c]) => { if (!SAFE_ID.test(k) || !c || c.id !== k) bad('card data'); });
+}
+
 // ---------------------------------------------------------------- modal & views
 function showModal(html) { $('#modalBody').innerHTML = html; $('#modal').classList.remove('hidden'); }
-function hideModal() { $('#modal').classList.add('hidden'); $('#modalBody').innerHTML = ''; }
+let modalSeq = 0;
+function hideModal() { modalSeq++; $('#modal').classList.add('hidden'); $('#modalBody').innerHTML = ''; }
 const TITLES = { scan: 'Scan', search: 'Search', collection: 'Collection', decks: 'Decks' };
 function setView(v) {
   $$('.view').forEach((s) => s.classList.toggle('active', s.id === 'view-' + v));
