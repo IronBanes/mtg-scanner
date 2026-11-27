@@ -113,7 +113,7 @@ test('totals group printings by card identity and exclude Maybe from deck value'
   a.call('cache', card('alternate', { prices: { usd_etched: '3.75' } }));
   a.call('addTo', 'collection', 'sol-ring', false, 2);
   a.call('addTo', 'collection', 'alternate', true);
-  assert.deepEqual(json(a.call('collectionTotals')), { cards: 3, value: 8.75, unique: 1 });
+  assert.deepEqual(json(a.call('collectionTotals')), { cards: 3, value: 8.75, change: 0, unique: 1 });
   assert.equal(a.call('ownedCount', 'sol-ring-oracle'), 3);
   const d = a.call('createDeck', 'Board tests');
   a.call('addTo', d.id, 'sol-ring', false, 2);
@@ -121,7 +121,7 @@ test('totals group printings by card identity and exclude Maybe from deck value'
   a.call('addTo', d.id, 'sol-ring', false, 4, 'maybe');
   a.call('addTo', d.id, 'sol-ring', true);
   a.call('removeFrom', d.id, 'sol-ring', false, 5, 'side');
-  assert.deepEqual(json(a.call('deckTotals', d)), { cards: 3, value: 10 });
+  assert.deepEqual(json(a.call('deckTotals', d)), { cards: 3, value: 10, change: 0 });
   assert.equal(a.call('deckText', d), '2 Sol Ring\n1 Sol Ring');
   assert.equal(d.cards.find((entry) => entry.board === 'maybe').qty, 4);
 });
@@ -506,4 +506,181 @@ test('a late card detail response cannot replace a newer card modal', async () =
   resolveSlow(ok(card()));
   await first;
   assert.match(a.element('#modalBody').innerHTML, /<h2>Opt<\/h2>/);
+});
+
+test('cache remembers the previous prices when they move, and only then', () => {
+  const a = app();
+  assert.equal(a.call('cache', card('fresh')).prev, undefined, 'a new card has no prev');
+  const first = a.call('cache', card('sol-ring'));
+  assert.equal(first.prev, undefined, 'the first fetch has nothing to compare against');
+  a.call('cache', card('sol-ring', { prices: { usd: '3.00', usd_foil: '5.00' } }));
+  const moved = a.state().cards['sol-ring'];
+  assert.deepEqual(json(moved.prev), { prices: { usd: '2.50', usd_foil: '5.00' }, at: first.updated });
+  // re-fetching an unchanged card keeps the last change instead of dropping it
+  a.call('cache', card('sol-ring', { prices: { usd: '3.00', usd_foil: '5.00' } }));
+  assert.deepEqual(json(a.state().cards['sol-ring'].prev), { prices: { usd: '2.50', usd_foil: '5.00' }, at: first.updated });
+  // a foil-only move still counts as a change
+  a.call('cache', card('sol-ring', { prices: { usd: '3.00', usd_foil: '4.00' } }));
+  assert.deepEqual(json(a.state().cards['sol-ring'].prev.prices), { usd: '3.00', usd_foil: '5.00' });
+  assert.ok(a.state().cards['sol-ring'].prev.at > first.updated, 'at moves to the newer refresh');
+  // review: a missing price key and Scryfall's null are the same, not a move
+  a.call('cache', card('etched', { prices: { usd: '1.00' } }));
+  a.call('cache', card('etched', { prices: { usd: '1.00', usd_foil: null, usd_etched: null } }));
+  assert.equal(a.state().cards.etched.prev, undefined);
+});
+
+test('priceChange: normal and foil entries, 0 without prev, 0 when a price is missing', () => {
+  const a = app();
+  assert.equal(a.call('priceChange', a.state().cards['nothing-there'], false), 0, 'no card, no change');
+  a.call('cache', card('plain'));
+  assert.equal(a.call('priceChange', a.state().cards.plain, false), 0, 'no prev yet');
+  a.call('cache', card('moved', { prices: { usd: '2.50', usd_foil: '5.00' } }));
+  a.call('cache', card('moved', { prices: { usd: '3.10', usd_foil: '4.00' } }));
+  assert.equal(a.call('priceChange', a.state().cards.moved, false), 0.6);
+  assert.equal(a.call('priceChange', a.state().cards.moved, true), -1);
+  // a missing price is not a change, in either direction
+  a.call('cache', card('gone', { prices: { usd: '2.50' } }));
+  a.call('cache', card('gone', { prices: {} }));
+  assert.equal(a.call('priceChange', a.state().cards.gone, false), 0);
+  a.call('cache', card('arrived', { prices: {} }));
+  a.call('cache', card('arrived', { prices: { usd: '2.50' } }));
+  assert.equal(a.call('priceChange', a.state().cards.arrived, false), 0);
+});
+
+test('refreshPrices counts cards whose entry price changed; doRefresh toasts the count', async () => {
+  let bump = false; // the last refresh moves a's normal price again
+  const a = app({ route: (url, body) => {
+    assert.equal(url.pathname, '/cards/collection');
+    const prices = {
+      a: bump ? { usd: '4.00', usd_foil: '5.00' } : { usd: '3.00', usd_foil: '5.00' },
+      b: { usd: '2.50', usd_foil: '5.00' },
+      c: { usd: '2.50', usd_foil: '4.00' },
+    };
+    return ok({ data: body.identifiers.map(({ id }) => ({ ...card(id), prices: prices[id] })) });
+  } });
+  a.call('cache', card('a', { prices: { usd: '2.50', usd_foil: '5.00' } }));
+  a.call('cache', card('b', { prices: { usd: '2.50', usd_foil: '5.00' } }));
+  a.call('cache', card('c', { prices: { usd: '2.50', usd_foil: '5.00' } }));
+  a.call('addTo', 'collection', 'a', false, 2);
+  a.call('addTo', 'collection', 'b', false, 1);
+  const d = a.call('createDeck', 'Refresh');
+  a.call('addTo', d.id, 'c', true, 1);
+  assert.equal(await a.call('refreshPrices', ['a', 'b', 'c']), 2, 'a moved (normal), c moved (foil), b did not');
+  assert.equal(await a.call('refreshPrices', ['a', 'b', 'c']), 0, 'nothing moves the second time');
+  await a.call('doRefresh', ['a', 'b', 'c']);
+  assert.match(a.element('#toast').innerHTML, /Prices updated — no changes/);
+  a.call('cache', card('d', { prices: { usd: '9.00' } }));
+  a.call('cache', card('d', { prices: { usd: '1.00' } }));
+  assert.equal(await a.call('refreshPrices', ['d']), 0, 'a card nothing points at has no entry price to compare');
+  bump = true;
+  await a.call('doRefresh', ['a']);
+  assert.match(a.element('#toast').innerHTML, /Prices updated — 1 changed/);
+});
+
+test('collection and deck changes sum per copy, and the deck skips Maybe', () => {
+  const a = app();
+  const cache2 = (id, prices, after) => { a.call('cache', card(id, { oracle_id: id + '-oracle', prices })); a.call('cache', card(id, { oracle_id: id + '-oracle', prices: after })); };
+  cache2('a', { usd: '2.50', usd_foil: '5.00' }, { usd: '3.50', usd_foil: '5.00' }); // +1.00 normal
+  cache2('b', { usd: '1.00', usd_foil: '2.00' }, { usd: '0.75', usd_foil: '2.00' }); // -0.25 normal
+  cache2('c', { usd: '2.00', usd_foil: '5.00' }, { usd: '2.00', usd_foil: '4.50' }); // -0.50 foil only
+  a.call('addTo', 'collection', 'a', false, 2);
+  a.call('addTo', 'collection', 'b', false, 1);
+  a.call('addTo', 'collection', 'c', true, 3);
+  assert.deepEqual(json(a.call('collectionTotals')), { cards: 6, value: 21.25, change: 0.25, unique: 3 });
+  const d = a.call('createDeck', 'Movers');
+  a.call('addTo', d.id, 'a', false, 1);
+  a.call('addTo', d.id, 'a', false, 4, 'maybe'); // skipped by the deck value
+  a.call('addTo', d.id, 'b', false, 1, 'side');
+  a.call('addTo', d.id, 'c', true, 1);
+  assert.deepEqual(json(a.call('deckTotals', d)), { cards: 3, value: 8.75, change: 0.25 });
+});
+
+test('card rows and value tiles show the change under the price, and only when there is one', () => {
+  const a = app();
+  const cache2 = (id, name, prices, after) => {
+    const base = { oracle_id: id + '-oracle', name, prices };
+    a.call('cache', card(id, base));
+    a.call('cache', card(id, { ...base, prices: after }));
+  };
+  cache2('up', 'Up', { usd: '2.50', usd_foil: '5.00' }, { usd: '2.90', usd_foil: '5.00' });   // +0.40 normal
+  cache2('down', 'Down', { usd: '2.50', usd_foil: '5.00' }, { usd: '2.50', usd_foil: '4.00' }); // -1.00 foil
+  cache2('same', 'Same', { usd: '2.50', usd_foil: '5.00' }, { usd: '2.50', usd_foil: '5.00' }); // no change
+  a.call('addTo', 'collection', 'up', false, 2);
+  a.call('addTo', 'collection', 'down', true, 1);
+  a.call('addTo', 'collection', 'same', false, 1);
+  const row = (id, foil = false) => a.call('cardRow', { cardId: id, foil, qty: 1 });
+  assert.match(row('up'), /<span class="chg up" title="was \$2\.50[^"]*">▲ \$0\.40<\/span>/);
+  assert.match(row('down', true), /class="chg down" title="was \$5\.00[^"]*">▼ \$1\.00</);
+  assert.ok(!row('same').includes('chg'), 'an unchanged card shows no change line');
+  assert.ok(!row('up', true).includes('chg'), 'the unchanged foil price of a moved card shows nothing');
+  a.call('renderCollection');
+  assert.ok(a.element('#collList').innerHTML.includes('▲ $0.40'), 'per copy, not per entry');
+  assert.match(a.element('#collStats').innerHTML, /<span class="chg down">▼ \$0\.20<\/span>/, '2× +0.40 − 1.00');
+  const d = a.call('createDeck', 'Mover deck');
+  a.call('addTo', d.id, 'up', false, 1);
+  a.call('addTo', d.id, 'down', true, 1, 'maybe'); // Maybe is not part of the deck value
+  a.eval(`openDeckId = ${JSON.stringify(d.id)}`);
+  a.call('renderDeckDetail');
+  assert.match(a.element('#deckDetail').innerHTML, /<span class="chg up">▲ \$0\.40<\/span>/);
+  assert.match(a.element('#deckDetail').innerHTML, /Deck value/);
+});
+
+test('the change sort orders by biggest absolute total change, ties by name', () => {
+  const a = app();
+  const mover = (id, name, from, to, qty) => {
+    const base = { oracle_id: id + '-oracle', name, prices: { usd: from, usd_foil: from } };
+    a.call('cache', card(id, base));
+    a.call('cache', card(id, { ...base, prices: { usd: to, usd_foil: to } }));
+    a.call('addTo', 'collection', id, false, qty);
+  };
+  mover('big', 'Big', '1.00', '2.00', 2);   // +2.00
+  mover('mid', 'Mid', '1.00', '0.50', 2);   // -1.00
+  mover('small', 'Small', '1.00', '0.70', 3); // -0.90
+  mover('ann', 'Ann', '1.00', '1.50', 1);  // +0.50
+  mover('zed', 'Zed', '1.00', '1.50', 1);  // +0.50, tied with Ann
+  a.element('#collSort').value = 'change';
+  a.call('renderCollection');
+  const order = () => [...a.element('#collList').innerHTML.matchAll(/data-id="([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(order(), ['big', 'mid', 'small', 'ann', 'zed']);
+  // review: $0.10 x 3 and $0.30 x 1 are the same total in cents, so the name decides (0.1 * 3 > 0.3 in floats)
+  mover('zz', 'Zz', '1.00', '1.10', 3);
+  mover('aa', 'Aa', '1.00', '1.30', 1);
+  a.call('renderCollection');
+  assert.deepEqual(order().slice(-2), ['aa', 'zz']);
+});
+
+test('review: value tiles hide a total change that rounds to zero cents', () => {
+  const a = app();
+  assert.equal(a.call('changeStat', 0.1 + 0.2 - 0.3), '');
+  assert.equal(a.call('changeStat', -0.004), '');
+  assert.match(a.call('changeStat', 0.1 + 0.2), /▲ \$0\.30/);
+});
+
+test('a legacy save with no prev loads, renders and saves without adding one', () => {
+  const legacy = JSON.stringify(saved({
+    cards: { 'sol-ring': { id: 'sol-ring', name: 'Sol Ring', oracle_id: 'sol-ring-oracle', set: 'c21', cn: '263', prices: { usd: '2.50', usd_foil: '5.00' }, updated: 1 } },
+    collection: [{ cardId: 'sol-ring', qty: 2, foil: false, added: 1 }],
+    decks: [{ id: 'deck', name: 'Old deck', format: 'commander', created: 1, cards: [{ cardId: 'sol-ring', qty: 1, foil: false, board: 'main' }] }],
+    recent: [{ cardId: 'sol-ring', foil: false, t: 1 }],
+  }));
+  const a = app({ raw: legacy });
+  assert.equal(a.state().schema, 1);
+  a.call('renderAll');
+  assert.match(a.element('#collStats').innerHTML, /Total value/);
+  assert.ok(!a.element('#collStats').innerHTML.includes('chg'), 'no change line without prev');
+  a.call('addTo', 'collection', 'sol-ring', false, 1);
+  a.flush();
+  const data = JSON.parse(a.stored.get(storageKey));
+  assert.equal(data.collection[0].qty, 3);
+  assert.equal(data.schema, 1);
+  for (const c of Object.values(data.cards)) assert.ok(!('prev' in c), 'no prev added to saved cards');
+  // a save that already has prev loads it and works (the field is additive, same schema)
+  const b = app({ raw: JSON.stringify(saved({
+    cards: { 'sol-ring': { id: 'sol-ring', name: 'Sol Ring', oracle_id: 'sol-ring-oracle', set: 'c21', prices: { usd: '3.00' }, prev: { prices: { usd: '2.50' }, at: 1 } } },
+    collection: [{ cardId: 'sol-ring', qty: 1 }],
+  })) });
+  assert.deepEqual(json(b.state().cards['sol-ring'].prev), { prices: { usd: '2.50' }, at: 1 });
+  assert.equal(b.call('priceChange', b.state().cards['sol-ring'], false), 0.5);
+  b.call('renderAll');
+  assert.match(b.element('#collStats').innerHTML, /<span class="chg up">▲ \$0\.50<\/span>/);
 });
