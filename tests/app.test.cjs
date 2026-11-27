@@ -642,6 +642,18 @@ test('the change sort orders by biggest absolute total change, ties by name', ()
   a.call('renderCollection');
   const order = () => [...a.element('#collList').innerHTML.matchAll(/data-id="([^"]+)"/g)].map((m) => m[1]);
   assert.deepEqual(order(), ['big', 'mid', 'small', 'ann', 'zed']);
+  // review: $0.10 x 3 and $0.30 x 1 are the same total in cents, so the name decides (0.1 * 3 > 0.3 in floats)
+  mover('zz', 'Zz', '1.00', '1.10', 3);
+  mover('aa', 'Aa', '1.00', '1.30', 1);
+  a.call('renderCollection');
+  assert.deepEqual(order().slice(-2), ['aa', 'zz']);
+});
+
+test('review: value tiles hide a total change that rounds to zero cents', () => {
+  const a = app();
+  assert.equal(a.call('changeStat', 0.1 + 0.2 - 0.3), '');
+  assert.equal(a.call('changeStat', -0.004), '');
+  assert.match(a.call('changeStat', 0.1 + 0.2), /▲ \$0\.30/);
 });
 
 test('a legacy save with no prev loads, renders and saves without adding one', () => {

@@ -777,6 +777,7 @@ function collectionStats(t) {
 }
 /** Extra change line for a value tile: the collection total or a deck's value. */
 function changeStat(change) {
+  change = Math.round(change * 100) / 100; // float sums like 0.1 + 0.2 - 0.3 leave a tiny residue: that's no change
   if (!change) return '';
   const dir = change > 0 ? 'up' : 'down', sym = change > 0 ? '▲' : '▼';
   return `<span class="chg ${dir}">${sym} ${money(Math.abs(change))}</span>`;
@@ -789,7 +790,10 @@ function renderCollection() {
   const C = (e) => state.cards[e.cardId];
   if (sort === 'name') list.sort((a, b) => C(a).name.localeCompare(C(b).name));
   else if (sort === 'price') list.sort((a, b) => unitPrice(C(b), b.foil) * b.qty - unitPrice(C(a), a.foil) * a.qty);
-  else if (sort === 'change') list.sort((a, b) => Math.abs(priceChange(C(b), b.foil) * b.qty) - Math.abs(priceChange(C(a), a.foil) * a.qty) || C(a).name.localeCompare(C(b).name));
+  else if (sort === 'change') {
+    const cents = (e) => Math.round(Math.abs(priceChange(C(e), e.foil) * e.qty) * 100); // whole cents, so equal totals tie
+    list.sort((a, b) => cents(b) - cents(a) || C(a).name.localeCompare(C(b).name));
+  }
   else if (sort === 'set') list.sort((a, b) => C(a).set_name.localeCompare(C(b).set_name) || C(a).cn.localeCompare(C(b).cn, undefined, { numeric: true }));
   else list.sort((a, b) => (b.added || 0) - (a.added || 0));
   $('#collList').innerHTML = list.length ? list.map((e) => cardRow(e, { qtyControls: true }).replace('<li ', `<li data-foil="${e.foil ? 1 : 0}" `)).join('')
