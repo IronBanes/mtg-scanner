@@ -234,6 +234,55 @@ function analyzeDeck(entries, cards, format) {
   };
 }
 
+/** Card data cached by an older build (before release 8) lacks the synergy tags. */
+function needsTags(card) { return !Array.isArray(card.tags); }
+
+/**
+ * Common deck themes from the cards' own rules text (see SYNERGY_RULES in app.js).
+ * entries: [{cardId, qty, board}], cards: {id: slimCard}. Pure, so it can be tested.
+ * Only main and commander cards count; a card name is counted once (qty is kept for display).
+ * Returns { themes: [{theme, name, desc, thing, make: [names], pay: [names], hint}], untagged }.
+ */
+function synergies(entries, cards) {
+  const rows = entries
+    .filter((e) => (e.board === 'main' || e.board === 'commander') && cards[e.cardId])
+    .map((e) => ({ ...e, card: cards[e.cardId] }));
+  const untagged = new Set(rows.filter((r) => needsTags(r.card)).map((r) => r.card.id)).size;
+  const themes = [];
+  for (const [theme, rule] of Object.entries(SYNERGY_RULES)) {
+    const make = new Set(), pay = new Set(); // card names, each counted once
+    for (const r of rows) {
+      if (needsTags(r.card)) continue; // cached by an older build: no tags to read
+      const tags = r.card.tags;
+      if (tags.includes(theme + ':make')) make.add(r.card.name);
+      if (tags.includes(theme + ':pay')) pay.add(r.card.name);
+    }
+    // instants and sorceries enable "spells", artifacts enable "artifacts" — but only when
+    // something rewards them, or every deck with instants would show a spells theme
+    if (pay.size && (theme === 'spells' || theme === 'artifacts')) {
+      for (const r of rows) {
+        if (needsTags(r.card)) continue; // older card data: let the fetch fill it in
+        const type = String(r.card.type || '').split(' // ')[0];
+        if (theme === 'spells' ? /\b(Instant|Sorcery)\b/.test(type) : /\bArtifact\b/.test(type)) make.add(r.card.name);
+      }
+    }
+    const m = [...make], p = [...pay];
+    if (m.length + p.length < 3) continue; // too few cards to call it a theme
+    const hint = !p.length
+      ? `${m.length} cards make ${rule.thing} but nothing rewards it.`
+      : !m.length
+        ? `${p.length} cards care about ${rule.thing} but nothing here makes it.`
+        : m.length >= 2 * p.length + 2
+          ? 'Lots of enablers. One or two more payoffs would use them.'
+          : p.length >= 2 * m.length + 2
+            ? `More payoffs than enablers. Add a few cards that make ${rule.thing}.`
+            : 'Good balance.';
+    themes.push({ theme, name: rule.name, desc: rule.desc, thing: rule.thing, make: m, pay: p, hint });
+  }
+  themes.sort((x, y) => (y.make.length + y.pay.length) - (x.make.length + x.pay.length));
+  return { themes, untagged };
+}
+
 /** Build a shuffled library (main deck only, expanded by qty). `rand` is injectable for tests. */
 function buildLibrary(entries, cards, rand = secureRandom) {
   const lib = [];
@@ -272,7 +321,7 @@ let detailFetch = null;
 const detailTried = new Set();
 function ensureCardDetails(d) {
   const missing = [...new Set(d.cards.map((e) => e.cardId))]
-    .filter((id) => state.cards[id] && needsDetails(state.cards[id]) && !detailTried.has(id));
+    .filter((id) => state.cards[id] && (needsDetails(state.cards[id]) || needsTags(state.cards[id])) && !detailTried.has(id));
   if (!missing.length || detailFetch) return false;
   missing.forEach((id) => detailTried.add(id));
   detailFetch = refreshPrices(missing).catch(() => toast('Couldn\u2019t load card details — check your connection'))
@@ -299,6 +348,7 @@ function statsHtml(d) {
   const commanders = d.cards.filter((e) => e.board === 'commander' && state.cards[e.cardId]).map((e) => state.cards[e.cardId]);
   const issues = a.issues;
   const kw = Object.entries(a.keywords).sort((x, y) => y[1].length - x[1].length);
+  const syn = synergies(d.cards, state.cards);
 
   return `${loading ? '<p class="muted">Loading card details…</p>' : ''}
     ${isCmd ? `<div class="panel"><div class="panel-head"><h3>Commander</h3><button class="btn small" id="pickCmd">${commanders.length ? 'Change' : 'Choose'}</button></div>
@@ -326,6 +376,12 @@ function statsHtml(d) {
     </div>
 
     <div class="panel"><h3>Card types</h3><div class="chips">${types || '<span class="muted">No cards yet.</span>'}</div></div>
+
+    <div class="panel"><h3>Synergies <small class="muted">found from card text, so it can miss some cards</small></h3>
+      ${syn.themes.length ? `<ul class="kw-list">${syn.themes.map((t) => `<li><details><summary><b>${esc(t.name)}</b> <span class="muted">· ${t.make.length} enabler${t.make.length !== 1 ? 's' : ''} · ${t.pay.length} payoff${t.pay.length !== 1 ? 's' : ''}</span><div class="${t.hint === 'Good balance.' ? 'ok' : 'warn'}">${esc(t.hint)}</div></summary><div class="kw-cards"><div class="muted">Enablers:</div><div>${t.make.map((n) => esc(n)).join(' · ') || '<span class="muted">none</span>'}</div><div class="muted">Payoffs:</div><div>${t.pay.map((n) => esc(n)).join(' · ') || '<span class="muted">none</span>'}</div></div></details></li>`).join('')}</ul>`
+        : `<p class="muted">${loading ? 'Loading…' : 'No clear themes yet.'}</p>`}
+      ${syn.untagged && !loading ? `<p class="warn">${syn.untagged} card${syn.untagged > 1 ? 's have' : ' has'}n’t been analysed yet — connect and tap Refresh prices.</p>` : ''}
+    </div>
 
     <div class="panel"><h3>Legendaries <small class="muted">(${a.legends.length})</small></h3>
       ${a.legends.length ? `<ul class="legend-list">${a.legends.map((l) => `<li><span data-open="${esc(l.id)}">${esc(l.name)}</span>${l.qty > 1 ? ` <b>×${l.qty}</b>` : ''}<small class="muted"> ${esc(l.type.split(' — ')[0])}</small>${l.isCommander ? ' <span class="badge-ok">Commander</span>' : l.canCommand && isCmd ? ' <span class="chip small">can command</span>' : ''}</li>`).join('')}</ul>` : '<p class="muted">No legendary cards.</p>'}
@@ -432,4 +488,4 @@ function wireHand(d) {
   }));
 }
 
-window.__insights = { analyzeDeck, buildLibrary, hypergeom, pipsOf, primaryType, setCommanders, ensureCardDetails, deckSig, KEYWORD_INFO };
+window.__insights = { analyzeDeck, synergies, needsTags, buildLibrary, hypergeom, pipsOf, primaryType, setCommanders, ensureCardDetails, deckSig, KEYWORD_INFO };

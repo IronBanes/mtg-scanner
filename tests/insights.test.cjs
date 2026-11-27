@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const { test } = require('node:test');
-const { app, card, json, failure } = require('./harness.cjs');
+const { app, card, json, failure, saved, storageKey } = require('./harness.cjs');
 
 const LEGAL = Object.fromEntries(['commander', 'standard', 'pioneer', 'modern', 'legacy', 'vintage', 'pauper'].map((f) => [f, 'legal']));
 /** A Scryfall-shaped card; cached through app.js's slim() so the tests see what the app stores. */
@@ -491,4 +491,230 @@ test('deck +/- buttons are at least 40px so they are easy to tap on a phone', ()
   const rule = css.match(/\.qty button \{([^}]*)\}/)[1];
   assert.match(rule, /width: 40px/);
   assert.match(rule, /height: 40px/);
+});
+
+// ---------------------------------------------------------------- synergies (release 8)
+/** A Scryfall-shaped card with release-8 tags, cached through slim() the way the app stores it. */
+const synCard = (id, o = {}) => sfCard(id, { keywords: [], oracle_text: '', ...o });
+
+test('synergies: played boards only, names once, threshold, sorting and untagged', () => {
+  const a = setup([
+    synCard('toker', { type_line: 'Creature — Elf', oracle_text: 'Create a 1/1 Elf Warrior creature token.' }),
+    synCard('twin', { type_line: 'Sorcery', oracle_text: 'Create a 1/1 white Soldier creature token.' }),
+    synCard('adorer', { type_line: 'Creature — Human', oracle_text: 'Creatures you control get +1/+1 as long as you control a token.' }),
+    synCard('miller', { type_line: 'Sorcery', oracle_text: 'Mill four cards.' }),
+    synCard('digger', { type_line: 'Sorcery', oracle_text: 'Surveil 2.' }),
+    synCard('grafter', { type_line: 'Instant', keywords: ['Flashback'], oracle_text: 'Draw a card.' }),
+    synCard('mage', { type_line: 'Creature — Wizard', keywords: ['Prowess'] }),
+    synCard('bolt', { type_line: 'Instant', oracle_text: 'Deal 3 damage to any target.' }),
+    synCard('bear', { type_line: 'Creature — Bear', oracle_text: 'Trample' }),
+    basic('Forest', ['G']),
+  ]);
+  const d = deck(a, 'Syn', 'commander', [
+    ['toker', 3], ['twin', 2], ['adorer', 1], ['miller', 2], ['digger', 1],
+    ['grafter', 2], ['mage', 1], ['bolt', 4], ['bear', 2], ['Forest', 20],
+  ]);
+  const r = json(a.insights().synergies(d.cards, a.state().cards));
+  const by = (name) => r.themes.find((t) => t.theme === name);
+
+  assert.deepEqual(r.themes.map((t) => t.theme), ['spells', 'tokens', 'graveyard'],
+    'sorted by make+pay total: spells 6, then tokens and graveyard (3 each, table order)');
+  assert.equal(r.untagged, 0, 'every card here was cached by this build');
+
+  const tokens = by('tokens');
+  assert.equal(tokens.name, 'Tokens');
+  assert.deepEqual(tokens.make, ['toker', 'twin'], 'names counted once — copies (3 and 2) do not matter');
+  assert.deepEqual(tokens.pay, ['adorer']);
+  assert.equal(tokens.hint, 'Good balance.');
+
+  const spells = by('spells');
+  assert.deepEqual(spells.make, ['twin', 'miller', 'digger', 'grafter', 'bolt'], 'instants and sorceries enable spells');
+  assert.deepEqual(spells.pay, ['mage']);
+  assert.equal(spells.hint, 'Lots of enablers. One or two more payoffs would use them.');
+
+  const graveyard = by('graveyard');
+  assert.deepEqual(graveyard.make, ['miller', 'digger'], 'mill and surveil fill the graveyard');
+  assert.deepEqual(graveyard.pay, ['grafter'], 'flashback plays out of it');
+  assert.equal(graveyard.hint, 'Good balance.');
+
+  // sideboard and maybe cards never count
+  const side = deck(a, 'Side', 'modern', [['toker', 4, 'side'], ['twin', 2, 'side'], ['bear', 4], ['Forest', 50]]);
+  const sideR = json(a.insights().synergies(side.cards, a.state().cards));
+  assert.ok(!sideR.themes.some((t) => t.theme === 'tokens'), 'sideboard tokens make no theme');
+  const maybe = deck(a, 'Maybe', 'modern', [['toker', 4, 'maybe'], ['bear', 4], ['Forest', 52]]);
+  assert.ok(!json(a.insights().synergies(maybe.cards, a.state().cards)).themes.some((t) => t.theme === 'tokens'), 'maybe-board tokens neither');
+
+  // one enabler and one payoff is under the >= 3 threshold
+  const two = deck(a, 'Two', 'modern', [['toker', 1], ['adorer', 1], ['bear', 20], ['Forest', 38]]);
+  assert.ok(!json(a.insights().synergies(two.cards, a.state().cards)).themes.some((t) => t.theme === 'tokens'));
+
+  // entries whose card is not cached are skipped, not counted as untagged
+  const ghost = json(a.insights().synergies([{ cardId: 'ghost', qty: 40, board: 'main' }], a.state().cards));
+  assert.deepEqual(ghost, { themes: [], untagged: 0 });
+
+  // cards cached by an older build (no tags) are skipped and reported
+  const strip = (id) => { const c = { ...a.state().cards[id] }; delete c.tags; return c; };
+  const cards = { ...a.state().cards, toker: strip('toker'), adorer: strip('adorer') };
+  const old = json(a.insights().synergies(d.cards, cards));
+  assert.equal(old.untagged, 2);
+  assert.ok(!old.themes.some((t) => t.theme === 'tokens'), 'the untagged pair contributes nothing');
+  assert.ok(old.themes.some((t) => t.theme === 'graveyard'), 'the tagged cards still count');
+});
+
+test('synergies: type-based enablers (spells/artifacts) only count when a payoff exists', () => {
+  const a = setup([
+    synCard('opt', { type_line: 'Instant', oracle_text: 'Draw a card.' }),
+    synCard('roast', { type_line: 'Sorcery', oracle_text: 'Deal 4 damage to target creature.' }),
+    synCard('grunt', { type_line: 'Creature — Ogre', oracle_text: 'Trample' }),
+    synCard('anvil', { type_line: 'Artifact', oracle_text: '{T}: Add one mana of any color.' }),
+    synCard('junker', { type_line: 'Artifact', oracle_text: '{T}: This artifact deals 1 damage to any target.' }),
+    synCard('mage', { type_line: 'Creature — Wizard', keywords: ['Prowess'] }),
+    synCard('smith', { type_line: 'Creature — Dwarf', oracle_text: 'This creature gets +1/+0 for each artifact you control.' }),
+  ]);
+  const cards = a.state().cards;
+  const e = (id, qty = 1, board = 'main') => ({ cardId: id, qty, board });
+  const theme = (entries, name) => json(a.insights().synergies(entries, cards)).themes.find((t) => t.theme === name);
+
+  assert.equal(theme([e('opt', 4), e('roast', 4), e('grunt', 4)], 'spells'), undefined, 'instants alone are no spells theme');
+  assert.equal(theme([e('anvil', 4), e('junker', 4), e('grunt', 4)], 'artifacts'), undefined, 'artifacts alone are no artifacts theme');
+
+  const spells = theme([e('opt', 4), e('roast', 4), e('grunt', 4), e('mage', 1)], 'spells');
+  assert.deepEqual(spells.make, ['opt', 'roast'], 'only instants and sorceries enable spells');
+  assert.deepEqual(spells.pay, ['mage']);
+  const artifacts = theme([e('anvil', 4), e('junker', 4), e('grunt', 4), e('smith', 1)], 'artifacts');
+  assert.deepEqual(artifacts.make, ['anvil', 'junker'], 'the artifacts themselves enable it');
+  assert.deepEqual(artifacts.pay, ['smith']);
+});
+
+test('synergies: every hint branch', () => {
+  const a = setup([]);
+  const cards = (specs) => {
+    const map = {};
+    for (const [id, oracle, keywords = []] of specs) map[id] = json(a.call('cache', synCard(id, { type_line: 'Enchantment', oracle_text: oracle, keywords })));
+    return map;
+  };
+  const e = (ids) => ids.map((id) => ({ cardId: id, qty: 1, board: 'main' }));
+  const hint = (map, ids) => json(a.insights().synergies(e(ids), map)).themes.find((t) => t.theme === 'tokens')?.hint;
+  const tokenText = 'Create a 1/1 white Spirit creature token.';
+  const anthemText = 'Creatures you control get +1/+1.';
+
+  // no payoffs: "N cards make <thing> but nothing rewards it."
+  assert.equal(hint(cards([['a', tokenText], ['b', tokenText], ['c', tokenText]]), ['a', 'b', 'c']),
+    '3 cards make tokens but nothing rewards it.');
+
+  // no enablers: "N cards care about <thing> but nothing here makes it."
+  const pays = cards([
+    ['p1', 'Whenever a token you control dies, draw a card.'],
+    ['p2', anthemText],
+    ['p3', 'Tokens you control have vigilance.'],
+  ]);
+  assert.equal(hint(pays, ['p1', 'p2', 'p3']), '3 cards care about tokens but nothing here makes it.');
+
+  // lots of enablers: make >= 2*pay + 2
+  const manySpecs = Array(5).fill().map((_, i) => ['m' + i, tokenText]).concat([['pay', anthemText]]);
+  assert.equal(hint(cards(manySpecs), manySpecs.map(([id]) => id)),
+    'Lots of enablers. One or two more payoffs would use them.');
+
+  // more payoffs than enablers: pay >= 2*make + 2
+  const fewSpecs = [['one', tokenText]].concat(Array(5).fill().map((_, i) => ['p' + i, anthemText]));
+  assert.equal(hint(cards(fewSpecs), fewSpecs.map(([id]) => id)),
+    'More payoffs than enablers. Add a few cards that make tokens.');
+
+  // otherwise: good balance
+  assert.equal(hint(cards([['m1', tokenText], ['m2', 'Create a 2/2 black Zombie creature token.'], ['pay', anthemText]]), ['m1', 'm2', 'pay']),
+    'Good balance.');
+});
+
+test('the Stats tab renders themes, the empty state and the untagged warning', () => {
+  const a = setup([
+    synCard('toker', { type_line: 'Creature — Elf', oracle_text: 'Create a 1/1 Elf Warrior creature token.' }),
+    synCard('twin', { type_line: 'Sorcery', oracle_text: 'Create a 1/1 white Soldier creature token.' }),
+    synCard('adorer', { type_line: 'Creature — Human', oracle_text: 'Creatures you control get +1/+1 as long as you control a token.' }),
+    synCard('bear', { type_line: 'Creature — Bear', oracle_text: 'Trample' }),
+    basic('Forest', ['G']),
+  ]);
+  const d = deck(a, 'Render', 'commander', [['toker', 3], ['adorer', 1], ['twin', 1], ['bear', 2], ['Forest', 40]]);
+  const html = open(a, d, 'stats');
+  assert.match(html, /<h3>Synergies <small class="muted">found from card text, so it can miss some cards<\/small><\/h3>/);
+  assert.match(html, /<b>Tokens<\/b> <span class="muted">· 2 enablers · 1 payoff<\/span>/);
+  assert.match(html, /<div class="ok">Good balance\.<\/div>/);
+  assert.match(html, /Enablers:<\/div><div>toker · twin<\/div>/);
+  assert.match(html, /Payoffs:<\/div><div>adorer<\/div>/);
+  assert.ok(!html.includes('been analysed'), 'no untagged warning when every card has tags');
+
+  // no themes at all: the empty state
+  const empty = deck(a, 'Empty', 'commander', []);
+  assert.match(open(a, empty, 'stats'), /No clear themes yet\./);
+
+  // an untagged card starts a details fetch: Loading… while it runs, the warning once it fails
+  const offline = app({ insights: true, route: () => failure(503, 'offline') });
+  offline.call('cache', synCard('legacy', { type_line: 'Creature — Human', oracle_text: 'Create a 1/1 white Spirit creature token.' }));
+  delete offline.state().cards.legacy.tags;
+  const old = offline.call('createDeck', 'Old', 'commander');
+  offline.call('addTo', old.id, 'legacy', false, 2);
+  const loading = open(offline, old, 'stats');
+  assert.match(loading, /Loading card details…/, 'the missing tags start a fetch');
+  assert.match(loading, /Loading…/, 'themes wait for it');
+  assert.ok(!loading.includes('been analysed'), 'no untagged warning while loading');
+});
+
+test('a card without tags triggers the details fetch; missing tags are not a legality problem', async () => {
+  const refetch = synCard('legacy', { type_line: 'Creature — Human', oracle_text: 'Create a 1/1 white Spirit creature token.' });
+  const a = setup([
+    synCard('toker', { type_line: 'Creature — Elf', oracle_text: 'Create a 1/1 Elf Warrior creature token.' }),
+    synCard('adorer', { type_line: 'Creature — Human', oracle_text: 'Creatures you control get +1/+1 as long as you control a token.' }),
+    refetch,
+  ], { route: async () => Response.json({ data: [refetch] }) });
+  delete a.state().cards.legacy.tags; // cached by an older build: full details, no tags
+  const d = deck(a, 'Old shape', 'commander', [['toker', 2], ['adorer', 1], ['legacy', 2]]);
+
+  assert.deepEqual(analyze(a, d).unchecked, [], 'a card without tags is not a legality problem');
+  assert.match(open(a, d, 'stats'), /Loading card details/, 'the missing tags start a fetch');
+  assert.deepEqual(json(a.requests.at(-1).body.identifiers), [{ id: 'legacy' }], 'only the untagged card is fetched');
+  await a.eval('detailFetch');
+  assert.ok(Array.isArray(a.state().cards.legacy.tags), 'slim() filled the tags in');
+  const r = json(a.insights().synergies(d.cards, a.state().cards));
+  assert.equal(r.untagged, 0);
+  assert.deepEqual(r.themes.find((t) => t.theme === 'tokens').make, ['toker', 'legacy']);
+  assert.deepEqual(analyze(a, d).unchecked, []);
+});
+
+test('a legacy save with no tags on any card loads, renders the Stats tab and saves', async () => {
+  const shape = (id) => ({
+    id, name: 'Legacy ' + id, oracle_id: id + '-oracle', set: 'c21', set_name: 'Commander 2021', cn: '263',
+    rarity: 'uncommon', type: 'Creature — Elf Druid', cmc: 1, mana: '{G}', colors: ['G'], keywords: [],
+    legal: { commander: 'legal', modern: 'legal' }, pairing: null, copyLimit: null, canCommand: false, partner: false,
+    prices: { usd: '0.10', usd_foil: '0.25' }, img: '', thumb: '', updated: 1,
+  });
+  const raw = JSON.stringify(saved({
+    cards: { 'legacy-a': shape('legacy-a'), 'legacy-b': shape('legacy-b'), 'legacy-c': shape('legacy-c') },
+    decks: [{ id: 'deck-1', name: 'Old deck', format: 'commander', created: 1,
+      cards: [
+        { cardId: 'legacy-a', qty: 2, foil: false, board: 'main' },
+        { cardId: 'legacy-b', qty: 2, foil: false, board: 'main' },
+        { cardId: 'legacy-c', qty: 2, foil: false, board: 'main' },
+      ] }],
+  }));
+  const a = app({
+    insights: true, raw,
+    route: async (_url, body) => Response.json({ data: body.identifiers.map(({ id }) => synCard(id, {
+      name: 'Legacy ' + id, type_line: 'Creature — Elf Druid', oracle_text: 'Create a 1/1 green Elf creature token.',
+    })) }),
+  });
+  const d = a.state().decks[0];
+  const html = open(a, d, 'stats');
+  assert.match(html, /Loading card details…/, 'the untagged cards start a fetch');
+  assert.match(html, /Loading…/, 'themes wait for it, like the Keywords panel');
+  assert.ok(!html.includes('been analysed'), 'no untagged warning while loading');
+  await a.eval('detailFetch');
+  assert.ok(Array.isArray(a.state().cards['legacy-a'].tags), 'the re-fetched cards have tags');
+  const after = a.element('#deckDetail').innerHTML;
+  assert.match(after, /Tokens/, 'the tokens theme renders once the tags arrive');
+  assert.ok(!after.includes('been analysed'), 'no untagged warning once every card is tagged');
+  a.call('addTo', d.id, 'legacy-a', false, 1);
+  a.flush();
+  const data = JSON.parse(a.stored.get(storageKey));
+  assert.equal(data.schema, 1, 'an optional card field needs no schema bump');
+  assert.equal(data.decks[0].cards[0].qty, 3, 'the legacy deck still saves');
+  assert.deepEqual(data.cards['legacy-a'].tags, ['tokens:make']);
 });
