@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>MTG Scanner</title>
+  <meta name="description" content="Scan, price and track Magic: The Gathering cards and decks.">
+  <meta name="theme-color" content="#14161c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="MTG Scanner">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="stylesheet" href="style.css?v=4">
+</head>
+<body>
+  <header class="topbar">
+    <h1 id="viewTitle">Scan</h1>
+    <button class="icon-btn" id="settingsBtn" aria-label="Settings and backup">⚙︎</button>
+  </header>
+
+  <main>
+    <!-- ================= SCAN ================= -->
+    <section id="view-scan" class="view active">
+      <div class="row gap">
+        <label class="field grow">
+          <span>Scanned cards go to</span>
+          <select id="destSelect"></select>
+        </label>
+      </div>
+      <div class="row gap">
+        <div class="seg" role="tablist" aria-label="Scan mode">
+          <button class="seg-btn active" data-mode="single">Single</button>
+          <button class="seg-btn" data-mode="multi">Multi</button>
+        </div>
+        <label class="toggle"><input type="checkbox" id="foilToggle"> Foil</label>
+        <label class="toggle"><input type="checkbox" id="exactToggle" checked> Exact printing</label>
+      </div>
+
+      <div class="camera" id="camera">
+        <video id="video" playsinline muted autoplay></video>
+        <div class="guide" id="guide"><div class="name-zone"></div><div class="set-zone"></div></div>
+        <div class="cam-msg" id="camMsg">
+          <p>Line the card up inside the frame, name at the top.</p>
+          <button class="btn primary" id="startCamBtn">Start camera</button>
+        </div>
+        <div class="scan-status" id="scanStatus"></div>
+      </div>
+
+      <div class="row gap center" id="singleControls">
+        <label class="btn ghost" for="photoInput">Photo</label>
+        <input type="file" id="photoInput" accept="image/*" hidden>
+        <button class="shutter" id="shutterBtn" aria-label="Scan card"></button>
+        <button class="btn ghost" id="manualBtn">Type</button>
+      </div>
+      <div class="row gap center hidden" id="multiControls">
+        <button class="btn primary big" id="autoBtn">Start auto-scan</button>
+      </div>
+
+      <div id="scanResult"></div>
+
+      <div class="list-head">
+        <h2>Recent scans <small id="recentTotal"></small></h2>
+        <div class="row gap">
+          <button class="btn small ghost" id="recentAddAllBtn">Add all to…</button>
+          <button class="btn small ghost" id="recentClearBtn">Clear</button>
+        </div>
+      </div>
+      <ul class="cards" id="recentList"></ul>
+    </section>
+
+    <!-- ================= SEARCH ================= -->
+    <section id="view-search" class="view">
+      <form id="searchForm" class="row gap" autocomplete="off">
+        <input type="search" id="searchInput" class="grow" placeholder="Card name, or Scryfall search like t:dragon c:r" enterkeyhint="search">
+        <button class="btn primary" type="submit">Search</button>
+      </form>
+      <ul class="suggest" id="suggestList"></ul>
+      <p class="hint" id="searchHint">Tip: plain names work, and so does full Scryfall syntax (e.g. <code>o:"draw a card" cmc<=2</code>).</p>
+      <div class="grid" id="searchResults"></div>
+      <div class="center"><button class="btn ghost hidden" id="moreBtn">Load more</button></div>
+    </section>
+
+    <!-- ================= COLLECTION ================= -->
+    <section id="view-collection" class="view">
+      <div class="stats" id="collStats"></div>
+      <div class="row gap">
+        <input type="search" id="collFilter" class="grow" placeholder="Filter collection">
+        <select id="collSort">
+          <option value="recent">Recent</option>
+          <option value="name">Name</option>
+          <option value="price">Price</option>
+          <option value="set">Set</option>
+        </select>
+      </div>
+      <div class="row gap wrap">
+        <button class="btn small ghost" id="collRefreshBtn">Refresh prices</button>
+        <button class="btn small ghost" id="collCsvBtn">Export CSV</button>
+        <button class="btn small ghost" id="collImportBtn">Import list</button>
+      </div>
+      <ul class="cards" id="collList"></ul>
+    </section>
+
+    <!-- ================= DECKS ================= -->
+    <section id="view-decks" class="view">
+      <div id="deckIndex">
+        <div class="row gap">
+          <button class="btn primary" id="newDeckBtn">New deck</button>
+        </div>
+        <ul class="decks" id="deckList"></ul>
+      </div>
+      <div id="deckDetail" class="hidden"></div>
+    </section>
+  </main>
+
+  <nav class="tabbar">
+    <button class="tab active" data-view="scan"><span class="ti">◎</span>Scan</button>
+    <button class="tab" data-view="search"><span class="ti">⌕</span>Search</button>
+    <button class="tab" data-view="collection"><span class="ti">▤</span>Collection</button>
+    <button class="tab" data-view="decks"><span class="ti">❒</span>Decks</button>
+  </nav>
+
+  <div class="modal hidden" id="modal" role="dialog" aria-modal="true">
+    <div class="sheet">
+      <button class="icon-btn close" id="modalClose" aria-label="Close">✕</button>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <!-- integrity covers this file only; Tesseract fetches its worker, core and language data at runtime -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js" integrity="sha384-GJqSu7vueQ9qN0E9yLPb3Wtpd7OrgK8KmYzC8T1IysG1bcvxvIO4qtYR/D3A991F" crossorigin="anonymous" defer></script>
+  <script src="app.js?v=4" defer></script>
+</body>
+</html>
