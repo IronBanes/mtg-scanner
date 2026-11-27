@@ -523,6 +523,10 @@ test('cache remembers the previous prices when they move, and only then', () => 
   a.call('cache', card('sol-ring', { prices: { usd: '3.00', usd_foil: '4.00' } }));
   assert.deepEqual(json(a.state().cards['sol-ring'].prev.prices), { usd: '3.00', usd_foil: '5.00' });
   assert.ok(a.state().cards['sol-ring'].prev.at > first.updated, 'at moves to the newer refresh');
+  // review: a missing price key and Scryfall's null are the same, not a move
+  a.call('cache', card('etched', { prices: { usd: '1.00' } }));
+  a.call('cache', card('etched', { prices: { usd: '1.00', usd_foil: null, usd_etched: null } }));
+  assert.equal(a.state().cards.etched.prev, undefined);
 });
 
 test('priceChange: normal and foil entries, 0 without prev, 0 when a price is missing', () => {

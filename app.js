@@ -192,8 +192,8 @@ function cache(c) {
   const s = slim(c);
   const old = state.cards[s.id];
   if (old) {
-    const P = (x) => x?.prices || {};
-    const moved = ['usd', 'usd_foil', 'usd_etched'].some((k) => P(old)[k] !== P(s)[k]);
+    const P = (x, k) => x?.prices?.[k] ?? null; // a missing key and Scryfall's null are the same "no price"
+    const moved = ['usd', 'usd_foil', 'usd_etched'].some((k) => P(old, k) !== P(s, k));
     // remember the last prices when they moved; keep the earlier change when they didn't
     s.prev = moved ? { prices: old.prices, at: old.updated } : old.prev;
   }
@@ -217,12 +217,13 @@ const frontName = (name) => String(name).split(' // ')[0];
 /** How many of these cards' entries have a different unit price than before the refresh (ids are counted once). */
 async function refreshPrices(ids) {
   ids = [...new Set(ids)];
-  const used = [...state.collection, ...state.decks.flatMap((d) => d.cards)];
-  const before = new Map(); // cardId -> [prices per foil flag present before]
-  ids.forEach((id) => {
-    const foils = new Set(used.filter((e) => e.cardId === id).map((e) => !!e.foil));
-    if (foils.size) before.set(id, [...foils].map((foil) => unitPrice(state.cards[id], foil)));
+  const finishes = new Map(); // cardId -> foil flags it's held in (one pass, not one scan per card)
+  [...state.collection, ...state.decks.flatMap((d) => d.cards)].forEach((e) => {
+    if (!finishes.has(e.cardId)) finishes.set(e.cardId, new Set());
+    finishes.get(e.cardId).add(!!e.foil);
   });
+  const before = new Map(); // cardId -> [price per foil flag, before the refresh]
+  ids.forEach((id) => { const f = finishes.get(id); if (f) before.set(id, [...f].map((foil) => unitPrice(state.cards[id], foil))); });
   for (let i = 0; i < ids.length; i += 75) {
     const chunk = ids.slice(i, i + 75);
     const res = await sf('/cards/collection', { method: 'POST', body: JSON.stringify({ identifiers: chunk.map((id) => ({ id })) }) });
@@ -230,8 +231,7 @@ async function refreshPrices(ids) {
   }
   let changed = 0;
   before.forEach((pricesBefore, id) => {
-    const foils = new Set(used.filter((e) => e.cardId === id).map((e) => !!e.foil));
-    const pricesAfter = [...foils].map((foil) => unitPrice(state.cards[id], foil));
+    const pricesAfter = [...finishes.get(id)].map((foil) => unitPrice(state.cards[id], foil));
     if (pricesBefore.some((p, i) => (p || pricesAfter[i]) && p !== pricesAfter[i])) changed++;
   });
   return changed;
