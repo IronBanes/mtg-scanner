@@ -149,7 +149,6 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-siz
 .grid .gc { cursor: pointer; text-align: center; font-size: 12px; }
 .grid .gc img { width: 100%; border-radius: 5px; aspect-ratio: 488 / 680; object-fit: cover; background: var(--panel2); display: block; }
 .grid .gc .own { font-size: 11px; color: var(--muted); margin-top: 1px; }
-.grid .gc .own b { color: var(--accent); font-weight: 600; }
 .grid .gc .gp { color: var(--accent); font-weight: 600; margin-top: 2px; }
 
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
@@ -206,8 +205,11 @@ li.shop-total .meta .n, li.shop-total .meta .s { text-align: left; }
   transition: opacity .2s, transform .2s; z-index: 30; max-width: 90vw; text-align: center;
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
-.toast button { margin-left: 10px; background: none; border: 0; color: var(--accent); font-weight: 700; cursor: pointer; padding: 0 2px; }
-.toast button[aria-label="Dismiss"] { color: var(--muted); font-weight: 400; }
+.toast button { margin-left: 10px; background: none; border: 0; color: var(--accent); font-weight: 700; cursor: pointer; padding: 6px 8px; }
+.toast button[aria-label="Dismiss"] { color: var(--muted); font-weight: 400; font-size: 18px; line-height: 1; margin-left: 2px; }
+/* the sticky update notice sits under the top bar so it never covers the scan buttons */
+.toast.sticky { bottom: auto; top: calc(64px + var(--safe-t)); transform: translateX(-50%) translateY(-20px); }
+.toast.sticky.show { transform: translateX(-50%) translateY(0); }
 
 /* ---------- deck insights ---------- */
 .deck-tabs { display: flex; margin: 6px 0 12px; }

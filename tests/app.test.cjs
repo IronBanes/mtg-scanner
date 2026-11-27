@@ -354,7 +354,7 @@ test('the deck shopping-list modal copies a store-ready list and exports only th
   assert.match(modal, /need 1 · own 0/);
   assert.match(modal, /\$0\.75/); // the foil entry's price
   assert.match(modal, /Total/);
-  assert.match(modal, /2 cards to buy/);
+  assert.match(modal, /3 cards to buy/); // copies, not rows
   assert.match(modal, /\$5\.75/);
   a.eval('navigator.clipboard = { writeText: async (t) => { __copied = t; } }');
   a.element('#shopCopy').onclick();
@@ -374,10 +374,12 @@ test('a sticky toast has no auto-hide timer and comes back after a normal toast'
   assert.ok(toast().classList.contains('show'));
   assert.match(toast().innerHTML, /A new version is ready/);
   assert.match(toast().innerHTML, /aria-label="Dismiss"/);
+  assert.ok(toast().classList.contains('sticky'), 'sticky notice sits under the top bar, clear of the scan buttons');
   assert.throws(() => a.advance(2200), /expected a pending timer/, 'a sticky toast leaves no auto-hide timer');
   a.call('toast', 'Added 1× Sol Ring'); // a normal toast replaces it on screen without losing it
   assert.match(toast().innerHTML, /Added 1× Sol Ring/);
   assert.ok(!toast().innerHTML.includes('A new version is ready'));
+  assert.ok(!toast().classList.contains('sticky'), 'normal toasts stay at the bottom');
   a.advance(2200); // the normal toast's timer brings the sticky notice back
   assert.match(toast().innerHTML, /A new version is ready/);
   assert.ok(toast().classList.contains('show'));
@@ -450,6 +452,22 @@ test('owned-only search keeps fetched pages, shows own-N badges, and re-renders 
   assert.match(results(), /None of these results are in your collection/);
   assert.ok(a.element('#moreBtn').classList.contains('hidden'), 'no more pages: Load more hides');
   assert.equal(a.requests.length, 3);
+});
+
+test('review: an owned deck shows no shopping buttons, and search badges refresh after adding a card', async () => {
+  const a = app({ route: () => ok({ data: [card()], has_more: false }) });
+  a.call('cache', card());
+  const d = a.call('createDeck', 'Owned');
+  a.call('addTo', d.id, 'sol-ring', false, 1);
+  a.call('addTo', 'collection', 'sol-ring', false, 1);
+  a.call('showShoppingList', d);
+  assert.match(a.element('#modalBody').innerHTML, /You own every card in this deck/);
+  assert.ok(!a.element('#modalBody').innerHTML.includes('shopCopy'));
+  await a.call('runSearch', 'Sol Ring');
+  assert.match(a.element('#searchResults').innerHTML, /own 1/);
+  a.call('addTo', 'collection', 'sol-ring', false, 2);
+  a.call('renderAll');
+  assert.match(a.element('#searchResults').innerHTML, /own 3/);
 });
 
 test('a late card detail response cannot replace a newer card modal', async () => {

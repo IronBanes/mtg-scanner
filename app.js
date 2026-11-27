@@ -34,6 +34,7 @@ function toast(msg, actionLabel, action, opts = {}) {
   const hide = () => { if (sticky) stickyToast = null; t.classList.remove('show'); };
   if (actionLabel) t.querySelector('button').onclick = () => { hide(); action(); };
   if (sticky) t.querySelector('button[aria-label="Dismiss"]').onclick = hide;
+  t.classList.toggle('sticky', sticky);
   t.classList.add('show');
   clearTimeout(toastTimer);
   if (sticky) { stickyToast = { msg, actionLabel, action }; return; } // stays until tapped or dismissed
@@ -836,11 +837,12 @@ function shoppingText(rows) {
 }
 function showShoppingList(d) {
   const rows = shoppingList(d);
-  const sum = rows.reduce((s, r) => s + r.total, 0);
+  const sum = rows.reduce((s, r) => s + r.total, 0), copies = rows.reduce((s, r) => s + r.missing, 0);
   showModal(`<h2>Shopping list</h2>
     ${rows.length ? `<ul class="cards">${rows.map((r) => `<li><div class="meta"><div class="n">${r.missing}× ${esc(r.name)}${r.foil ? '<span class="badge foil">FOIL</span>' : ''}</div><div class="s">need ${r.need} · own ${r.have}</div></div><div class="p"><b>${money(r.total)}</b></div></li>`).join('')}
-      <li class="shop-total"><div class="meta"><div class="n">Total</div><div class="s">${rows.length} card${rows.length === 1 ? '' : 's'} to buy</div></div><div class="p"><b>${money(sum)}</b></div></li></ul>` : `<p class="empty">You own every card in this deck.</p>`}
-    <div class="row gap"><button class="btn grow" id="shopCopy">Copy list</button><button class="btn grow" id="shopCsv">Export CSV</button></div>`);
+      <li class="shop-total"><div class="meta"><div class="n">Total</div><div class="s">${copies} card${copies === 1 ? '' : 's'} to buy</div></div><div class="p"><b>${money(sum)}</b></div></li></ul>
+    <div class="row gap"><button class="btn grow" id="shopCopy">Copy list</button><button class="btn grow" id="shopCsv">Export CSV</button></div>` : `<p class="empty">You own every card in this deck.</p>`}`);
+  if (!rows.length) return;
   $('#shopCopy').onclick = () => copyText(shoppingText(rows), 'Shopping list copied');
   $('#shopCsv').onclick = () => downloadCsv(d.name + ' shopping list', rows.map((r) => ({ cardId: r.cardId, qty: r.missing, foil: r.foil })));
 }
@@ -1057,7 +1059,7 @@ function setView(v) {
   if (v === 'scan') renderDestSelect();
   window.scrollTo(0, 0);
 }
-function renderAll() { renderDestSelect(); renderRecent(); renderCollection(); renderDecks(); }
+function renderAll() { renderDestSelect(); renderRecent(); renderCollection(); renderDecks(); if (searchCards.length) renderSearchResults(); }
 
 // qty buttons and card opening via delegation
 document.addEventListener('click', (e) => {
