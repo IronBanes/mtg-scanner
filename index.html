@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icons/icon-180.png">
   <link rel="icon" type="image/png" href="icons/icon-192.png">
-  <link rel="stylesheet" href="style.css?v=5">
+  <link rel="stylesheet" href="style.css?v=6">
 </head>
 <body>
   <header class="topbar">
@@ -77,6 +77,7 @@
         <input type="search" id="searchInput" class="grow" placeholder="Card name, or Scryfall search like t:dragon c:r" enterkeyhint="search">
         <button class="btn primary" type="submit">Search</button>
       </form>
+      <label class="toggle"><input type="checkbox" id="searchOwned"> Owned only</label>
       <ul class="suggest" id="suggestList"></ul>
       <p class="hint" id="searchHint">Tip: plain names work, and so does full Scryfall syntax (e.g. <code>o:"draw a card" cmc<=2</code>).</p>
       <div class="grid" id="searchResults"></div>
@@ -133,7 +134,7 @@
 
   <!-- integrity covers this file only; Tesseract fetches its worker, core and language data at runtime -->
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js" integrity="sha384-GJqSu7vueQ9qN0E9yLPb3Wtpd7OrgK8KmYzC8T1IysG1bcvxvIO4qtYR/D3A991F" crossorigin="anonymous" defer></script>
-  <script src="app.js?v=5" defer></script>
-  <script src="insights.js?v=5" defer></script>
+  <script src="app.js?v=6" defer></script>
+  <script src="insights.js?v=6" defer></script>
 </body>
 </html>

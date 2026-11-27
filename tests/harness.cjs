@@ -19,11 +19,18 @@ const card = (id = 'sol-ring', overrides = {}) => ({
 function app({ raw, route, ocr = [], confirm = () => true, offlineStorage = false, mediaDevices, insights = false, all = {} } = {}) {
   const stored = new Map(raw === undefined ? [] : [[storageKey, raw]]);
   const requests = [], timers = new Map(), elements = new Map();
-  let nextTimer = 0, tick = 0;
+  let nextTimer = 0, tick = 0, reloads = 0;
   const element = (selector) => {
     if (!elements.has(selector)) {
+      const set = new Set(); // Set-backed classList so tests can assert on .show / .hidden
       elements.set(selector, {
-        value: '', checked: false, innerHTML: '', classList: { add() {}, remove() {}, toggle() {} },
+        value: '', checked: false, innerHTML: '',
+        classList: {
+          add: (...names) => names.forEach((n) => set.add(n)),
+          remove: (...names) => names.forEach((n) => set.delete(n)),
+          toggle: (name, force) => ((force === undefined ? !set.has(name) : !!force) ? set.add(name) : set.delete(name)),
+          contains: (name) => set.has(name),
+        },
         addEventListener() {}, querySelector: element, insertAdjacentHTML(_, html) { this.innerHTML += html; },
       });
     }
@@ -42,6 +49,7 @@ function app({ raw, route, ocr = [], confirm = () => true, offlineStorage = fals
   };
   const context = createContext({
     console: { warn() {} }, crypto: globalThis.crypto, navigator: { mediaDevices }, window: { Tesseract }, Tesseract, confirm,
+    location: { reload: () => { reloads++; } },
     // Advance enough between calls to keep Scryfall's request pacing from needing real timers.
     Date: class extends Date { static now() { return Date.UTC(2026, 0, 1) + (tick += 1000); } },
     document: {
@@ -78,7 +86,7 @@ function app({ raw, route, ocr = [], confirm = () => true, offlineStorage = fals
   // index.html loads insights.js right after app.js; both share one global scope
   if (insights) runInContext(insightsSource, context, { filename: 'insights.js' });
   return {
-    stored, requests, element,
+    stored, requests, element, reloads: () => reloads,
     state: () => context.window.__mtg.state(),
     insights: () => context.window.__insights,
     /** Evaluate an expression in the page scope, e.g. to read or set a top-level `let`. */

@@ -26,13 +26,22 @@ function levRatio(a, b) {
 }
 
 let toastTimer;
-function toast(msg, actionLabel, action) {
+let stickyToast = null; // a pending "new version is ready" toast: normal toasts must not lose it for good
+function toast(msg, actionLabel, action, opts = {}) {
   const t = $('#toast');
-  t.innerHTML = esc(msg) + (actionLabel ? ` <button>${esc(actionLabel)}</button>` : '');
-  if (actionLabel) t.querySelector('button').onclick = () => { t.classList.remove('show'); action(); };
+  const sticky = !!opts.sticky;
+  t.innerHTML = esc(msg) + (actionLabel ? ` <button>${esc(actionLabel)}</button>` : '') + (sticky ? ` <button aria-label="Dismiss">×</button>` : '');
+  const hide = () => { if (sticky) stickyToast = null; t.classList.remove('show'); };
+  if (actionLabel) t.querySelector('button').onclick = () => { hide(); action(); };
+  if (sticky) t.querySelector('button[aria-label="Dismiss"]').onclick = hide;
   t.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), actionLabel ? 4500 : 2200);
+  if (sticky) { stickyToast = { msg, actionLabel, action }; return; } // stays until tapped or dismissed
+  toastTimer = setTimeout(() => {
+    t.classList.remove('show');
+    const s = stickyToast;
+    if (s) toast(s.msg, s.actionLabel, s.action, { sticky: true }); // bring the sticky notice back
+  }, actionLabel ? 4500 : 2200);
 }
 
 let audioCtx;
@@ -66,7 +75,7 @@ const defaultState = () => ({
   collection: [],     // {cardId, foil, qty, added}
   decks: [],          // {id, name, format, created, cards:[{cardId, foil, qty, board}]}
   recent: [],         // {cardId, foil, t}
-  settings: { dest: 'none', sound: true, exact: true },
+  settings: { dest: 'none', sound: true, exact: true, searchOwned: false },
 });
 let state = defaultState();
 function keepSafetyCopy(tag, raw) {
@@ -584,6 +593,7 @@ function renderRecent() {
 
 // ---------------------------------------------------------------- search
 let searchNext = null;
+let searchCards = []; // cards shown by the current search (every fetched page)
 function attachAutocomplete(input, listEl, onPick) {
   let t, seq = 0;
   input._acCancel = () => { clearTimeout(t); seq++; listEl.innerHTML = ''; };
@@ -605,19 +615,16 @@ function attachAutocomplete(input, listEl, onPick) {
 async function runSearch(q, append = false) {
   const res = $('#searchResults');
   $('#searchInput')._acCancel?.();
-  if (!append) { res.innerHTML = '<p class="muted">Searching…</p>'; searchNext = null; }
+  if (!append) { res.innerHTML = '<p class="muted">Searching…</p>'; searchNext = null; searchCards = []; }
   try {
     const r = await sf(append ? searchNext : '/cards/search?unique=cards&order=name&q=' + encodeURIComponent(q));
     if (!append) {
-      res.innerHTML = '';
       const nq = norm(q), rank = (c) => (norm(c.name) === nq ? 0 : norm(c.name).startsWith(nq) ? 1 : 2);
       r.data.sort((a, b) => rank(a) - rank(b));
     }
     r.data.forEach(cache);
-    res.insertAdjacentHTML('beforeend', r.data.map((c) => {
-      const s = state.cards[c.id];
-      return `<div class="gc" data-open="${esc(s.id)}"><img src="${esc(s.thumb)}" alt="${esc(s.name)}" loading="lazy"><div>${esc(s.name)}</div><div class="gp">${unitPrice(s) ? money(unitPrice(s)) : '—'}</div></div>`;
-    }).join(''));
+    searchCards.push(...r.data.map((c) => state.cards[c.id]));
+    renderSearchResults();
     searchNext = r.has_more ? r.next_page : null;
     $('#moreBtn').classList.toggle('hidden', !searchNext);
     $('#searchHint').classList.add('hidden');
@@ -625,6 +632,25 @@ async function runSearch(q, append = false) {
     res.innerHTML = `<p class="empty">${e.status === 404 ? 'No cards found.' : esc(e.message)}</p>`;
     $('#moreBtn').classList.add('hidden');
   }
+}
+/** oracle_id -> owned copies (any printing), in one pass over the collection. */
+function ownedByOracle() {
+  const owned = new Map();
+  state.collection.forEach((e) => {
+    const c = state.cards[e.cardId];
+    if (c) owned.set(c.oracle_id, (owned.get(c.oracle_id) || 0) + (Number(e.qty) || 0));
+  });
+  return owned;
+}
+function renderSearchResults() {
+  const res = $('#searchResults');
+  const owned = ownedByOracle();
+  const shown = state.settings.searchOwned ? searchCards.filter((c) => owned.get(c.oracle_id)) : searchCards;
+  res.innerHTML = shown.map((c) => {
+    const have = owned.get(c.oracle_id) || 0;
+    return `<div class="gc" data-open="${esc(c.id)}"><img src="${esc(c.thumb)}" alt="${esc(c.name)}" loading="lazy"><div>${esc(c.name)}</div>${have ? `<div class="own">own ${have}</div>` : ''}<div class="gp">${unitPrice(c) ? money(unitPrice(c)) : '—'}</div></div>`;
+  }).join('');
+  if (!shown.length && searchCards.length) res.innerHTML = '<p class="empty">None of these results are in your collection.</p>';
 }
 
 // ---------------------------------------------------------------- card detail
@@ -762,6 +788,7 @@ function renderDeckDetail() {
       <button class="btn small" id="deckScan">Scan into deck</button>
       <button class="btn small" id="deckCsv">Export CSV</button>
       <button class="btn small" id="deckText">Copy for Untap</button>
+      <button class="btn small" id="deckShop">Shopping list</button>
       <button class="btn small ghost" id="deckImport">Import list</button>
       <button class="btn small ghost" id="deckRefresh">Refresh prices</button>
     </div>${insights ? deckTabsHtml(d) : ''}`;
@@ -786,9 +813,36 @@ function renderDeckDetail() {
   $('#deckScan').onclick = () => { state.settings.dest = d.id; save(); renderDestSelect(); setView('scan'); };
   $('#deckCsv').onclick = () => downloadCsv(d.name, d.cards.map((e) => ({ ...e })));
   $('#deckText').onclick = () => copyText(deckText(d), 'Deck list copied — paste it into Untap’s deck import');
+  $('#deckShop').onclick = () => showShoppingList(d);
   $('#deckImport').onclick = () => importDialog(d.id);
   $('#deckRefresh').onclick = () => doRefresh(d.cards.map((e) => e.cardId));
   $('#deckMenu').onclick = () => editDeck(d);
+}
+/** Cards the deck needs more of (main + commander only), priced for the missing copies. */
+function shoppingList(d) {
+  const entries = d.cards.filter((e) => (e.board === 'main' || e.board === 'commander') && state.cards[e.cardId]);
+  const need = {};
+  entries.forEach((e) => { const c = state.cards[e.cardId]; need[c.oracle_id] = (need[c.oracle_id] || 0) + (Number(e.qty) || 0); });
+  return Object.entries(need).map(([oid, n]) => {
+    const have = ownedCount(oid), missing = n - have;
+    if (missing <= 0) return null;
+    const e = entries.find((x) => state.cards[x.cardId]?.oracle_id === oid); // same first entry missingValue uses
+    const card = state.cards[e.cardId], unit = unitPrice(card, e.foil);
+    return { cardId: e.cardId, name: card.name, foil: !!e.foil, need: n, have, missing, unit, total: unit * missing };
+  }).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name));
+}
+function shoppingText(rows) {
+  return [...rows.map((r) => `${r.missing} ${r.name}`), '', `Total: ${money(rows.reduce((s, r) => s + r.total, 0))}`].join('\n');
+}
+function showShoppingList(d) {
+  const rows = shoppingList(d);
+  const sum = rows.reduce((s, r) => s + r.total, 0);
+  showModal(`<h2>Shopping list</h2>
+    ${rows.length ? `<ul class="cards">${rows.map((r) => `<li><div class="meta"><div class="n">${r.missing}× ${esc(r.name)}${r.foil ? '<span class="badge foil">FOIL</span>' : ''}</div><div class="s">need ${r.need} · own ${r.have}</div></div><div class="p"><b>${money(r.total)}</b></div></li>`).join('')}
+      <li class="shop-total"><div class="meta"><div class="n">Total</div><div class="s">${rows.length} card${rows.length === 1 ? '' : 's'} to buy</div></div><div class="p"><b>${money(sum)}</b></div></li></ul>` : `<p class="empty">You own every card in this deck.</p>`}
+    <div class="row gap"><button class="btn grow" id="shopCopy">Copy list</button><button class="btn grow" id="shopCsv">Export CSV</button></div>`);
+  $('#shopCopy').onclick = () => copyText(shoppingText(rows), 'Shopping list copied');
+  $('#shopCsv').onclick = () => downloadCsv(d.name + ' shopping list', rows.map((r) => ({ cardId: r.cardId, qty: r.missing, foil: r.foil })));
 }
 function editDeck(d) {
   showModal(`<h2>Edit deck</h2>
@@ -1018,6 +1072,14 @@ document.addEventListener('click', (e) => {
   if (o) openCard(o.dataset.open, { defaultDest: state.settings.searchDest || (openDeckId && $('#view-decks').classList.contains('active') ? openDeckId : undefined) });
 });
 
+/** Sticky "a new release is waiting" notice: Reload swaps to it, or reloads directly if another tab already did. */
+function offerUpdate(worker) {
+  toast('A new version is ready', 'Reload', () => {
+    worker.postMessage('SKIP_WAITING');
+    if (worker.state === 'activated' || worker.state === 'redundant') location.reload();
+  }, { sticky: true });
+}
+
 // ---------------------------------------------------------------- wire up
 function init() {
   load();
@@ -1057,6 +1119,8 @@ function init() {
     };
   };
 
+  $('#searchOwned').checked = !!state.settings.searchOwned;
+  $('#searchOwned').onchange = (e) => { state.settings.searchOwned = e.target.checked; save(); renderSearchResults(); };
   attachAutocomplete($('#searchInput'), $('#suggestList'), (name) => runSearch(`!"${name}"`));
   $('#searchForm').onsubmit = (e) => { e.preventDefault(); const q = $('#searchInput').value.trim(); if (q) runSearch(q); };
   $('#moreBtn').onclick = () => searchNext && runSearch('', true);
@@ -1081,12 +1145,11 @@ function init() {
     const hadController = !!navigator.serviceWorker.controller;
     let reloading = false;
     navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloading) { reloading = true; location.reload(); } });
-    const offer = (w) => toast('A new version is ready', 'Reload', () => w.postMessage('SKIP_WAITING'));
     navigator.serviceWorker.register('sw.js').then((reg) => {
-      if (reg.waiting && navigator.serviceWorker.controller) offer(reg.waiting);
+      if (reg.waiting && navigator.serviceWorker.controller) offerUpdate(reg.waiting);
       reg.addEventListener('updatefound', () => {
         const w = reg.installing;
-        w && w.addEventListener('statechange', () => { if (w.state === 'installed' && navigator.serviceWorker.controller) offer(w); });
+        w && w.addEventListener('statechange', () => { if (w.state === 'installed' && navigator.serviceWorker.controller) offerUpdate(w); });
       });
     }).catch(() => {});
   }
