@@ -188,22 +188,53 @@ function slim(c) {
     updated: Date.now(),
   };
 }
-function cache(c) { const s = slim(c); state.cards[s.id] = s; save(); return s; }
+function cache(c) {
+  const s = slim(c);
+  const old = state.cards[s.id];
+  if (old) {
+    const P = (x) => x?.prices || {};
+    const moved = ['usd', 'usd_foil', 'usd_etched'].some((k) => P(old)[k] !== P(s)[k]);
+    // remember the last prices when they moved; keep the earlier change when they didn't
+    s.prev = moved ? { prices: old.prices, at: old.updated } : old.prev;
+  }
+  state.cards[s.id] = s; save(); return s;
+}
 function unitPrice(card, foil) {
   if (!card) return 0;
   const p = card.prices || {};
   const v = foil ? (p.usd_foil || p.usd_etched || p.usd) : (p.usd || p.usd_foil || p.usd_etched);
   return Number(v) || 0;
 }
+/** Unit price change since the last refresh, in dollars (0 when unknown or not a change). */
+function priceChange(card, foil) {
+  if (!card?.prev) return 0;
+  const now = unitPrice(card, foil), was = unitPrice({ prices: card.prev.prices }, foil);
+  if (!now || !was) return 0; // a missing price is not a change
+  return Math.round((now - was) * 100) / 100;
+}
 const frontName = (name) => String(name).split(' // ')[0];
 
+/** How many of these cards' entries have a different unit price than before the refresh (ids are counted once). */
 async function refreshPrices(ids) {
   ids = [...new Set(ids)];
+  const used = [...state.collection, ...state.decks.flatMap((d) => d.cards)];
+  const before = new Map(); // cardId -> [prices per foil flag present before]
+  ids.forEach((id) => {
+    const foils = new Set(used.filter((e) => e.cardId === id).map((e) => !!e.foil));
+    if (foils.size) before.set(id, [...foils].map((foil) => unitPrice(state.cards[id], foil)));
+  });
   for (let i = 0; i < ids.length; i += 75) {
     const chunk = ids.slice(i, i + 75);
     const res = await sf('/cards/collection', { method: 'POST', body: JSON.stringify({ identifiers: chunk.map((id) => ({ id })) }) });
     res.data.forEach(cache);
   }
+  let changed = 0;
+  before.forEach((pricesBefore, id) => {
+    const foils = new Set(used.filter((e) => e.cardId === id).map((e) => !!e.foil));
+    const pricesAfter = [...foils].map((foil) => unitPrice(state.cards[id], foil));
+    if (pricesBefore.some((p, i) => (p || pricesAfter[i]) && p !== pricesAfter[i])) changed++;
+  });
+  return changed;
 }
 
 // name lookups from OCR text, cached per session
@@ -580,8 +611,16 @@ function cardRow(entry, { qtyControls, extra = '', sub = '' } = {}) {
       <div class="s">${esc(c.set.toUpperCase())} #${esc(c.cn)} · ${esc(c.set_name)}${sub}</div>
     </div>
     ${qtyControls ? `<div class="qty"><button data-q="-1">−</button><b>${qty | 0}</b><button data-q="1">+</button></div>` : ''}
-    <div class="p"><b>${money(unit * qty)}</b>${qty > 1 ? `<span>${money(unit)} ea</span>` : ''}</div>
+    <div class="p"><b>${money(unit * qty)}</b>${qty > 1 ? `<span>${money(unit)} ea</span>` : ''}${changeHtml(c, entry.foil)}</div>
   </li>`;
+}
+/** "▲ $0.40" under a row price: the change since the last refresh, when there is one. */
+function changeHtml(card, foil) {
+  const ch = priceChange(card, foil);
+  if (!ch) return '';
+  const dir = ch > 0 ? 'up' : 'down', sym = ch > 0 ? '▲' : '▼';
+  const at = card.prev.at ? ' on ' + new Date(card.prev.at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
+  return `<span class="chg ${dir}" title="was ${money(unitPrice({ prices: card.prev.prices }, foil))}${esc(at)}">${sym} ${money(Math.abs(ch))}</span>`;
 }
 function renderRecent() {
   const list = state.recent.filter((r) => state.cards[r.cardId]);
@@ -727,26 +766,35 @@ async function openCard(cardId, { afterAdd, defaultDest } = {}) {
 
 // ---------------------------------------------------------------- collection
 function collectionTotals() {
-  let cards = 0, value = 0;
+  let cards = 0, value = 0, change = 0;
   const unique = new Set();
-  state.collection.forEach((e) => { const c = state.cards[e.cardId]; if (!c) return; cards += e.qty; value += unitPrice(c, e.foil) * e.qty; unique.add(c.oracle_id); });
-  return { cards, value, unique: unique.size };
+  state.collection.forEach((e) => { const c = state.cards[e.cardId]; if (!c) return; cards += e.qty; value += unitPrice(c, e.foil) * e.qty; change += priceChange(c, e.foil) * e.qty; unique.add(c.oracle_id); });
+  return { cards, value, change, unique: unique.size };
+}
+function collectionStats(t) {
+  return `<div class="stat hl"><b>${money(t.value)}</b><span>Total value</span>${changeStat(t.change)}</div>
+    <div class="stat"><b>${t.cards}</b><span>Cards</span></div><div class="stat"><b>${t.unique}</b><span>Unique</span></div>`;
+}
+/** Extra change line for a value tile: the collection total or a deck's value. */
+function changeStat(change) {
+  if (!change) return '';
+  const dir = change > 0 ? 'up' : 'down', sym = change > 0 ? '▲' : '▼';
+  return `<span class="chg ${dir}">${sym} ${money(Math.abs(change))}</span>`;
 }
 function renderCollection() {
   const t = collectionTotals();
-  $('#collStats').innerHTML = `<div class="stat hl"><b>${money(t.value)}</b><span>Total value</span></div>
-    <div class="stat"><b>${t.cards}</b><span>Cards</span></div><div class="stat"><b>${t.unique}</b><span>Unique</span></div>`;
+  $('#collStats').innerHTML = collectionStats(t);
   const f = norm($('#collFilter').value), sort = $('#collSort').value;
   let list = state.collection.filter((e) => state.cards[e.cardId] && (!f || norm(state.cards[e.cardId].name + state.cards[e.cardId].type).includes(f)));
   const C = (e) => state.cards[e.cardId];
   if (sort === 'name') list.sort((a, b) => C(a).name.localeCompare(C(b).name));
   else if (sort === 'price') list.sort((a, b) => unitPrice(C(b), b.foil) * b.qty - unitPrice(C(a), a.foil) * a.qty);
+  else if (sort === 'change') list.sort((a, b) => Math.abs(priceChange(C(b), b.foil) * b.qty) - Math.abs(priceChange(C(a), a.foil) * a.qty) || C(a).name.localeCompare(C(b).name));
   else if (sort === 'set') list.sort((a, b) => C(a).set_name.localeCompare(C(b).set_name) || C(a).cn.localeCompare(C(b).cn, undefined, { numeric: true }));
   else list.sort((a, b) => (b.added || 0) - (a.added || 0));
   $('#collList').innerHTML = list.length ? list.map((e) => cardRow(e, { qtyControls: true }).replace('<li ', `<li data-foil="${e.foil ? 1 : 0}" `)).join('')
     : `<li class="empty">${state.collection.length ? 'Nothing matches.' : 'Your collection is empty. Scan cards with “Collection” selected, or add them from Search.'}</li>`;
 }
-
 // ---------------------------------------------------------------- decks
 let openDeckId = null;
 function createDeck(name, format = 'commander') {
@@ -754,9 +802,9 @@ function createDeck(name, format = 'commander') {
   state.decks.push(d); save(); renderAll(); return d;
 }
 function deckTotals(d) {
-  let cards = 0, value = 0;
-  d.cards.forEach((e) => { const c = state.cards[e.cardId]; if (!c || e.board === 'maybe') return; cards += e.qty; value += unitPrice(c, e.foil) * e.qty; });
-  return { cards, value };
+  let cards = 0, value = 0, change = 0;
+  d.cards.forEach((e) => { const c = state.cards[e.cardId]; if (!c || e.board === 'maybe') return; cards += e.qty; value += unitPrice(c, e.foil) * e.qty; change += priceChange(c, e.foil) * e.qty; });
+  return { cards, value, change };
 }
 function ownedCount(oracleId) {
   return state.collection.filter((e) => state.cards[e.cardId]?.oracle_id === oracleId).reduce((s, e) => s + e.qty, 0);
@@ -787,7 +835,7 @@ function renderDeckDetail() {
     if (miss) { const e = d.cards.find((x) => state.cards[x.cardId]?.oracle_id === oid); missingValue += miss * unitPrice(state.cards[e.cardId], e.foil); }
   });
   let html = `<div class="deck-head"><button class="icon-btn" id="deckBack" aria-label="Back">‹</button><h2>${esc(d.name)}</h2><button class="btn small ghost" id="deckMenu">Edit</button></div>
-    <div class="stats"><div class="stat hl"><b>${money(t.value)}</b><span>Deck value</span></div><div class="stat"><b>${t.cards - side}</b><span>Cards${side ? ` + ${side} side` : ''}</span></div><div class="stat"><b>${money(missingValue)}</b><span>Not owned</span></div></div>
+    <div class="stats"><div class="stat hl"><b>${money(t.value)}</b><span>Deck value</span>${changeStat(t.change)}</div><div class="stat"><b>${t.cards - side}</b><span>Cards${side ? ` + ${side} side` : ''}</span></div><div class="stat"><b>${money(missingValue)}</b><span>Not owned</span></div></div>
     <div class="row gap wrap">
       <button class="btn small primary" id="deckAdd">Add card</button>
       <button class="btn small" id="deckScan">Scan into deck</button>
@@ -975,7 +1023,11 @@ async function importList(text, dest, report) {
 async function doRefresh(ids) {
   if (!ids.length) return;
   toast('Refreshing prices…');
-  try { await refreshPrices(ids); renderAll(); toast('Prices updated'); }
+  try {
+    const changed = await refreshPrices(ids);
+    renderAll();
+    toast(changed ? `Prices updated — ${changed} changed` : 'Prices updated — no changes');
+  }
   catch (e) { toast('Price refresh failed: ' + e.message); }
 }
 
