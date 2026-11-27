@@ -22,3 +22,8 @@ Runs in Safari on iPhone — tap **Share → Add to Home Screen** to install it 
 
 ## Run locally
 Any static file server works, e.g. `npx http-server -p 8765`. The camera needs HTTPS (or localhost).
+
+## Releasing
+The service worker caches each release as one unit. On every deploy, bump `VERSION` in `sw.js`
+**and** the matching `?v=` on `style.css` / `app.js` in `index.html`. Phones download the whole new
+release in the background and show a "new version — Reload" notice when it's ready.

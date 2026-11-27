@@ -993,7 +993,13 @@ function init() {
   const todo = stale.filter((id) => used.has(id));
   if (todo.length && navigator.onLine) refreshPrices(todo).then(renderAll).catch(() => {});
 
-  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    const hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (hadController) toast('A new version is ready', 'Reload', () => location.reload());
+    });
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
 }
 init();
 
