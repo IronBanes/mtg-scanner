@@ -116,6 +116,8 @@ function primaryType(type) {
   return TYPE_ORDER.find((t) => front.includes(t)) || 'Other';
 }
 function isBasic(card) { return /\bBasic\b/.test(card.type || ''); }
+/** Card data cached by an older build lacks fields the checks need (legalities, pairing, copy limit). */
+function needsDetails(card) { return !card.legal || !('pairing' in card) || !('copyLimit' in card); }
 function isBackground(card) { return /\bBackground\b/.test(String(card.type || '').split(' // ')[0]); }
 const PAIRS = { 'choose-background': 'background', background: 'choose-background', 'doctors-companion': 'doctor', doctor: 'doctors-companion' };
 /** Can these two cards be commanders together? Partner/Friends forever pair with their own kind,
@@ -193,7 +195,8 @@ function analyzeDeck(entries, cards, format) {
     const byName = {}, restricted = new Set();
     for (const r of rows.filter((x) => x.board !== 'maybe')) {
       const c = r.card, status = c.legal && c.legal[fmt];
-      if (!c.legal) unchecked.add(c.name);
+      // no status for this format, or older card data: the result can't be trusted as Legal yet
+      if (needsDetails(c) || !(fmt in c.legal)) unchecked.add(c.name);
       if (status === 'banned') issues.push({ kind: 'banned', card: c.name, text: `${c.name} is banned in ${fmt}.` });
       else if (status === 'not_legal') issues.push({ kind: 'not_legal', card: c.name, text: `${c.name} isn’t legal in ${fmt}.` });
       else if (status === 'restricted') restricted.add(c.name);
@@ -269,7 +272,7 @@ let detailFetch = null;
 const detailTried = new Set();
 function ensureCardDetails(d) {
   const missing = [...new Set(d.cards.map((e) => e.cardId))]
-    .filter((id) => state.cards[id] && !state.cards[id].legal && !detailTried.has(id));
+    .filter((id) => state.cards[id] && needsDetails(state.cards[id]) && !detailTried.has(id));
   if (!missing.length || detailFetch) return false;
   missing.forEach((id) => detailTried.add(id));
   detailFetch = refreshPrices(missing).catch(() => toast('Couldn\u2019t load card details — check your connection'))
@@ -367,9 +370,13 @@ function setCommanders(d, ids) {
     const current = d.cards.filter((x) => x.board === 'commander' && x.cardId === id);
     if (current.length) {
       // already a commander: keep exactly one copy, surplus (e.g. "2 Krenko" imported under Commander) goes to the main deck
+      // entries are edited directly: a restored backup can hold two entries with the same card and foil
       current.forEach((e, i) => {
         const extra = e.qty - (i === 0 ? 1 : 0);
-        if (extra > 0) { removeFrom(d.id, id, e.foil, extra, 'commander'); addTo(d.id, id, e.foil, extra, 'main'); }
+        if (extra <= 0) return;
+        e.qty -= extra;
+        if (!e.qty) d.cards.splice(d.cards.indexOf(e), 1);
+        addTo(d.id, id, e.foil, extra, 'main');
       });
       continue;
     }

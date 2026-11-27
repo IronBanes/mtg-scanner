@@ -198,6 +198,32 @@ test('legality is not reported as Legal while some cards have no legality data',
   assert.match(open(a, fresh, 'stats'), /badge-ok">Legal/);
 });
 
+test('a card with no status for the deck format is unchecked, not Legal', () => {
+  const a = setup([]);
+  const full = { id: 'x', name: 'x', type: 'Instant', cmc: 1, colors: [], pairing: null, copyLimit: null };
+  const cards = { x: { ...full, legal: { standard: 'legal' } }, y: { ...full, id: 'y', name: 'y', legal: { modern: 'legal' } } };
+  const r = json(a.insights().analyzeDeck([{ cardId: 'x', qty: 1, board: 'main' }, { cardId: 'y', qty: 1, board: 'main' }], cards, 'modern'));
+  assert.deepEqual(r.unchecked, ['x']);
+});
+
+test('cards cached by an older build (legal but no pairing/copy limit) are refetched and unchecked until then', async () => {
+  const nazgul = sfCard('nazgul', { type_line: 'Creature — Wraith Knight', oracle_text: 'A deck can have up to nine cards named nazgul.' });
+  const a = setup([nazgul], { route: async () => Response.json({ data: [nazgul] }) });
+  // simulate the older cached shape
+  delete a.state().cards.nazgul.copyLimit;
+  delete a.state().cards.nazgul.pairing;
+  const d = deck(a, 'Old shape', 'commander', [['nazgul', 9]]);
+  const before = analyze(a, d);
+  assert.deepEqual(before.unchecked, ['nazgul']);
+  assert.equal(before.issues.filter((i) => i.kind === 'copies').length, 1, 'without the copy limit the format limit applies');
+  assert.match(open(a, d, 'stats'), /Loading card details/);
+  assert.equal(a.requests.length, 1);
+  await a.eval('detailFetch');
+  const after = analyze(a, d);
+  assert.deepEqual(after.unchecked, []);
+  assert.deepEqual(after.issues.filter((i) => i.kind === 'copies'), []);
+});
+
 test('60-card legality: minimum size, sideboard limit, four copies, basics unlimited', () => {
   const a = setup([sfCard('opt'), sfCard('negate'), basic('Island', ['U'])]);
   const d = deck(a, 'Blue', 'modern', [['opt', 5], ['negate', 4], ['Island', 51], ['negate', 16, 'side']]);
@@ -259,6 +285,15 @@ test('setCommanders keeps one commander copy and moves extras to the main deck w
   a.insights().setCommanders(d, ['krenko']);
   const boards = json(d.cards).map(({ cardId, qty, board, foil }) => `${board}:${cardId}x${qty}${foil ? 'f' : ''}`).sort();
   assert.deepEqual(boards, ['commander:krenkox1', 'main:krenkox1', 'main:krenkox1f']);
+});
+
+test('setCommanders handles two commander entries with the same card and foil (restored backup)', () => {
+  const a = setup([legend('krenko', ['R'])]);
+  const d = deck(a, 'Backup', 'commander', []);
+  d.cards.push({ cardId: 'krenko', foil: false, qty: 1, board: 'commander' }, { cardId: 'krenko', foil: false, qty: 2, board: 'commander' });
+  a.insights().setCommanders(d, ['krenko']);
+  const boards = json(d.cards).map(({ cardId, qty, board, foil }) => `${board}:${cardId}x${qty}${foil ? 'f' : ''}`).sort();
+  assert.deepEqual(boards, ['commander:krenkox1', 'main:krenkox2'], 'three copies in, three copies out');
 });
 
 test('commander picker drops ids that are not in the deck and refuses more than two', () => {
