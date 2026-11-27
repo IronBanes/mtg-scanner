@@ -994,11 +994,16 @@ function init() {
   if (todo.length && navigator.onLine) refreshPrices(todo).then(renderAll).catch(() => {});
 
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
-    const hadController = !!navigator.serviceWorker.controller;
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (hadController) toast('A new version is ready', 'Reload', () => location.reload());
-    });
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    let reloading = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (reloading) location.reload(); });
+    const offer = (w) => toast('A new version is ready', 'Reload', () => { reloading = true; w.postMessage('SKIP_WAITING'); });
+    navigator.serviceWorker.register('sw.js').then((reg) => {
+      if (reg.waiting && navigator.serviceWorker.controller) offer(reg.waiting);
+      reg.addEventListener('updatefound', () => {
+        const w = reg.installing;
+        w && w.addEventListener('statechange', () => { if (w.state === 'installed' && navigator.serviceWorker.controller) offer(w); });
+      });
+    }).catch(() => {});
   }
 }
 init();
