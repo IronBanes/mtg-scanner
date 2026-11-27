@@ -13,6 +13,8 @@ const root = origin + '/mtg-scanner/';
 const appPath = html.match(/<script src="(app\.js\?v=\d+)"/)[1];
 const stylePath = html.match(/<link rel="stylesheet" href="(style\.css\?v=\d+)"/)[1];
 const version = Number(new URL(appPath, root).searchParams.get('v'));
+// every versioned file index.html loads (app.js, insights.js, style.css, ...)
+const versioned = [...html.matchAll(/(?:src|href)="([\w-]+\.(?:js|css)\?v=\d+)"/g)].map((m) => m[1]);
 const current = 'mtgscan-r' + version;
 const complete = '/__release-complete__';
 
@@ -76,7 +78,7 @@ test('install stages the complete versioned shell and waits for explicit activat
   const w = worker();
   await w.dispatch('install');
   assert.deepEqual(w.precache.map((r) => r.url).sort(), [
-    './', 'index.html', appPath, stylePath, 'manifest.webmanifest',
+    './', 'index.html', ...versioned, 'manifest.webmanifest',
     'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png',
   ].map((path) => new URL(path, root).href).sort());
   assert.ok(w.precache.every((r) => r.cache === 'reload'));
@@ -137,4 +139,10 @@ test('OCR assets are cached after success and remain retryable after an HTTP fai
   available = false;
   assert.equal(await (await w.request(asset)).text(), 'model');
   assert.equal(w.requests.length, 2);
+});
+
+test('every versioned file in index.html matches the service worker VERSION', () => {
+  const swVersion = Number(source.match(/const VERSION = '(\d+)'/)[1]);
+  assert.ok(versioned.length >= 3, 'expected app.js, insights.js and style.css');
+  for (const path of versioned) assert.equal(Number(path.split('?v=')[1]), swVersion, path + ' must match VERSION in sw.js');
 });

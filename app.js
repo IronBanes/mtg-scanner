@@ -135,10 +135,39 @@ async function sf(path, opts = {}) {
   return data;
 }
 
+const LEGAL_FORMATS = ['commander', 'standard', 'pioneer', 'modern', 'legacy', 'vintage', 'pauper'];
+const NUMBER_WORDS = { two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+/** "A deck can have up to nine cards named Nazgûl." -> 9 (null when the card has no own limit). */
+function copyLimitOf(oracle) {
+  const m = /deck can have up to (\w+) cards named/i.exec(oracle);
+  return m ? NUMBER_WORDS[m[1].toLowerCase()] || Number(m[1]) || null : null;
+}
+/** How a commander may be paired with a second one: {kind, name?} or null. Kinds must match (see validPair in insights.js). */
+function pairingOf(keywords, oracle, frontType) {
+  const pw = /Partner with ([^\n(]+?)\s*(?:\(|\n|$)/.exec(oracle);
+  if (pw) return { kind: 'partner-with', name: pw[1].trim() };
+  if (keywords.includes('Partner')) return { kind: 'partner' };
+  if (keywords.includes('Friends forever') || /Friends forever/i.test(oracle)) return { kind: 'friends' };
+  if (/Choose a Background/i.test(oracle)) return { kind: 'choose-background' };
+  if (/\bBackground\b/.test(frontType)) return { kind: 'background' };
+  if (/Doctor.s companion/i.test(oracle)) return { kind: 'doctors-companion' };
+  if (/\bTime Lord Doctor\b/.test(frontType)) return { kind: 'doctor' };
+  return null;
+}
 function slim(c) {
   const face = c.card_faces && c.card_faces[0];
   const img = c.image_uris || (face && face.image_uris) || {};
+  const oracle = c.oracle_text ?? (c.card_faces || []).map((f) => f.oracle_text || '').join('\n');
+  const frontType = (c.type_line || (face && face.type_line) || '').split(' // ')[0];
+  const keywords = c.keywords || [];
+  const legal = {};
+  if (c.legalities) LEGAL_FORMATS.forEach((f) => { if (c.legalities[f]) legal[f] = c.legalities[f]; });
   return {
+    keywords, produced: c.produced_mana || [], legal: c.legalities ? legal : undefined,
+    canCommand: /\bLegendary\b/.test(frontType) && (/\bCreature\b/.test(frontType) || /can be your commander/i.test(oracle)),
+    partner: keywords.includes('Partner') || /Partner with|Choose a Background/i.test(oracle) || /\bBackground\b/.test(frontType),
+    anyNumber: /deck can have any number of cards named/i.test(oracle),
+    copyLimit: copyLimitOf(oracle), pairing: pairingOf(keywords, oracle, frontType),
     id: c.id, name: c.name, set: c.set, set_name: c.set_name, cn: c.collector_number,
     rarity: c.rarity, type: c.type_line || (face && face.type_line) || '',
     mana: c.mana_cost ?? (face && face.mana_cost) ?? '', cmc: c.cmc,
@@ -715,7 +744,10 @@ function renderDeckDetail() {
   $('#deckIndex').classList.toggle('hidden', !!d);
   $('#deckDetail').classList.toggle('hidden', !d);
   if (!d) return;
+  const insights = typeof deckTabsHtml === 'function';
+  const tab = insights ? (syncDeckTab(d), deckTab) : 'cards';
   const t = deckTotals(d);
+  const side = d.cards.filter((e) => e.board === 'side' && state.cards[e.cardId]).reduce((s, e) => s + e.qty, 0);
   let missingValue = 0;
   const need = {};
   d.cards.forEach((e) => { const c = state.cards[e.cardId]; if (c && e.board !== 'maybe') need[c.oracle_id] = (need[c.oracle_id] || 0) + e.qty; });
@@ -724,7 +756,7 @@ function renderDeckDetail() {
     if (miss) { const e = d.cards.find((x) => state.cards[x.cardId]?.oracle_id === oid); missingValue += miss * unitPrice(state.cards[e.cardId], e.foil); }
   });
   let html = `<div class="deck-head"><button class="icon-btn" id="deckBack" aria-label="Back">‹</button><h2>${esc(d.name)}</h2><button class="btn small ghost" id="deckMenu">Edit</button></div>
-    <div class="stats"><div class="stat hl"><b>${money(t.value)}</b><span>Deck value</span></div><div class="stat"><b>${t.cards}</b><span>Cards</span></div><div class="stat"><b>${money(missingValue)}</b><span>Not owned</span></div></div>
+    <div class="stats"><div class="stat hl"><b>${money(t.value)}</b><span>Deck value</span></div><div class="stat"><b>${t.cards - side}</b><span>Cards${side ? ` + ${side} side` : ''}</span></div><div class="stat"><b>${money(missingValue)}</b><span>Not owned</span></div></div>
     <div class="row gap wrap">
       <button class="btn small primary" id="deckAdd">Add card</button>
       <button class="btn small" id="deckScan">Scan into deck</button>
@@ -732,8 +764,10 @@ function renderDeckDetail() {
       <button class="btn small" id="deckText">Copy for Untap</button>
       <button class="btn small ghost" id="deckImport">Import list</button>
       <button class="btn small ghost" id="deckRefresh">Refresh prices</button>
-    </div>`;
-  BOARDS.forEach(([b, label]) => {
+    </div>${insights ? deckTabsHtml(d) : ''}`;
+  if (tab === 'stats') html += statsHtml(d);
+  else if (tab === 'hand') html += handHtml(d);
+  else BOARDS.forEach(([b, label]) => {
     const rows = d.cards.filter((e) => e.board === b && state.cards[e.cardId]).sort((a, z) => state.cards[a.cardId].name.localeCompare(state.cards[z.cardId].name));
     if (!rows.length) return;
     const n = rows.reduce((s, e) => s + e.qty, 0), v = rows.reduce((s, e) => s + e.qty * unitPrice(state.cards[e.cardId], e.foil), 0);
@@ -744,9 +778,10 @@ function renderDeckDetail() {
         .replace('<li ', `<li data-foil="${e.foil ? 1 : 0}" data-board="${b}" `);
     }).join('') + '</ul>';
   });
-  if (!d.cards.length) html += `<p class="empty">Empty deck. Add cards from Search, scan them in, or import a list.</p>`;
+  if (!d.cards.length && tab === 'cards') html += `<p class="empty">Empty deck. Add cards from Search, scan them in, or import a list.</p>`;
   $('#deckDetail').innerHTML = html;
-  $('#deckBack').onclick = () => { openDeckId = null; renderDecks(); };
+  if (insights) wireDeckTabs(d);
+  $('#deckBack').onclick = () => { openDeckId = null; if (insights) deckTabFor = null; renderDecks(); };
   $('#deckAdd').onclick = () => { setView('search'); state.settings.searchDest = d.id; $('#searchInput').focus(); toast(`Tap a card, then Add → ${d.name}`); };
   $('#deckScan').onclick = () => { state.settings.dest = d.id; save(); renderDestSelect(); setView('scan'); };
   $('#deckCsv').onclick = () => downloadCsv(d.name, d.cards.map((e) => ({ ...e })));

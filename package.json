@@ -1,0 +1,8 @@
+{
+  "name": "mtg-scanner",
+  "private": true,
+  "description": "Phone web app to scan, price and track Magic: The Gathering cards and decks",
+  "scripts": {
+    "test": "node --test tests/app.test.cjs tests/insights.test.cjs tests/sw.test.cjs"
+  }
+}
