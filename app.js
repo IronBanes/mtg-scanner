@@ -595,6 +595,7 @@ function renderRecent() {
 // ---------------------------------------------------------------- search
 let searchNext = null;
 let searchCards = []; // cards shown by the current search (every fetched page)
+let searchSeq = 0;    // bumped by each new search so late responses from an older one are ignored
 function attachAutocomplete(input, listEl, onPick) {
   let t, seq = 0;
   input._acCancel = () => { clearTimeout(t); seq++; listEl.innerHTML = ''; };
@@ -617,8 +618,10 @@ async function runSearch(q, append = false) {
   const res = $('#searchResults');
   $('#searchInput')._acCancel?.();
   if (!append) { res.innerHTML = '<p class="muted">Searching…</p>'; searchNext = null; searchCards = []; }
+  const my = append ? searchSeq : ++searchSeq; // later pages belong to the search that started them
   try {
     const r = await sf(append ? searchNext : '/cards/search?unique=cards&order=name&q=' + encodeURIComponent(q));
+    if (my !== searchSeq) return; // a newer search started: drop this response
     if (!append) {
       const nq = norm(q), rank = (c) => (norm(c.name) === nq ? 0 : norm(c.name).startsWith(nq) ? 1 : 2);
       r.data.sort((a, b) => rank(a) - rank(b));
@@ -630,6 +633,7 @@ async function runSearch(q, append = false) {
     $('#moreBtn').classList.toggle('hidden', !searchNext);
     $('#searchHint').classList.add('hidden');
   } catch (e) {
+    if (my !== searchSeq) return;
     res.innerHTML = `<p class="empty">${e.status === 404 ? 'No cards found.' : esc(e.message)}</p>`;
     $('#moreBtn').classList.add('hidden');
   }
@@ -1059,7 +1063,10 @@ function setView(v) {
   if (v === 'scan') renderDestSelect();
   window.scrollTo(0, 0);
 }
-function renderAll() { renderDestSelect(); renderRecent(); renderCollection(); renderDecks(); if (searchCards.length) renderSearchResults(); }
+function renderAll() { renderDestSelect(); renderRecent(); renderCollection(); renderDecks();
+  $('#searchOwned').checked = !!state.settings.searchOwned; // stays in sync after a backup restore
+  if (searchCards.length) renderSearchResults();
+}
 
 // qty buttons and card opening via delegation
 document.addEventListener('click', (e) => {

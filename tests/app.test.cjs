@@ -470,6 +470,30 @@ test('review: an owned deck shows no shopping buttons, and search badges refresh
   assert.match(a.element('#searchResults').innerHTML, /own 3/);
 });
 
+test('a late response from an older search cannot replace or extend newer results', async () => {
+  let resolveOld;
+  const old = new Promise((resolve) => { resolveOld = resolve; });
+  const a = app({ route: (url) => (url.searchParams.get('q') === 'Old'
+    ? old
+    : ok({ data: [card()], has_more: false })) });
+  const first = a.call('runSearch', 'Old');
+  await a.call('runSearch', 'Sol Ring');
+  resolveOld(ok({ data: [card('stale', { name: 'Stale', oracle_id: 'stale-oracle' })], has_more: true, next_page: 'https://api.scryfall.com/cards/search?page=2&q=Old' }));
+  await first;
+  const html = a.element('#searchResults').innerHTML;
+  assert.match(html, /data-open="sol-ring"/);
+  assert.ok(!html.includes('stale'));
+  assert.equal(a.eval('searchNext'), null, 'the stale page cannot set Load more');
+});
+
+test('restoring state syncs the owned-only checkbox on the next render', () => {
+  const a = app();
+  a.element('#searchOwned').checked = false;
+  a.state().settings.searchOwned = true;
+  a.call('renderAll');
+  assert.equal(a.element('#searchOwned').checked, true);
+});
+
 test('a late card detail response cannot replace a newer card modal', async () => {
   let resolveSlow;
   const slow = new Promise((resolve) => { resolveSlow = resolve; });
