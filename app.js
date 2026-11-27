@@ -725,8 +725,10 @@ function renderDeckDetail() {
   $('#deckIndex').classList.toggle('hidden', !!d);
   $('#deckDetail').classList.toggle('hidden', !d);
   if (!d) return;
-  if (hand && hand.deckId !== d.id) hand = null;
+  const insights = typeof deckTabsHtml === 'function';
+  const tab = insights ? (syncDeckTab(d), deckTab) : 'cards';
   const t = deckTotals(d);
+  const side = d.cards.filter((e) => e.board === 'side' && state.cards[e.cardId]).reduce((s, e) => s + e.qty, 0);
   let missingValue = 0;
   const need = {};
   d.cards.forEach((e) => { const c = state.cards[e.cardId]; if (c && e.board !== 'maybe') need[c.oracle_id] = (need[c.oracle_id] || 0) + e.qty; });
@@ -735,7 +737,7 @@ function renderDeckDetail() {
     if (miss) { const e = d.cards.find((x) => state.cards[x.cardId]?.oracle_id === oid); missingValue += miss * unitPrice(state.cards[e.cardId], e.foil); }
   });
   let html = `<div class="deck-head"><button class="icon-btn" id="deckBack" aria-label="Back">‹</button><h2>${esc(d.name)}</h2><button class="btn small ghost" id="deckMenu">Edit</button></div>
-    <div class="stats"><div class="stat hl"><b>${money(t.value)}</b><span>Deck value</span></div><div class="stat"><b>${t.cards}</b><span>Cards</span></div><div class="stat"><b>${money(missingValue)}</b><span>Not owned</span></div></div>
+    <div class="stats"><div class="stat hl"><b>${money(t.value)}</b><span>Deck value</span></div><div class="stat"><b>${t.cards - side}</b><span>Cards${side ? ` + ${side} side` : ''}</span></div><div class="stat"><b>${money(missingValue)}</b><span>Not owned</span></div></div>
     <div class="row gap wrap">
       <button class="btn small primary" id="deckAdd">Add card</button>
       <button class="btn small" id="deckScan">Scan into deck</button>
@@ -743,9 +745,9 @@ function renderDeckDetail() {
       <button class="btn small" id="deckText">Copy for Untap</button>
       <button class="btn small ghost" id="deckImport">Import list</button>
       <button class="btn small ghost" id="deckRefresh">Refresh prices</button>
-    </div>${deckTabsHtml()}`;
-  if (deckTab === 'stats') html += statsHtml(d);
-  else if (deckTab === 'hand') html += handHtml(d);
+    </div>${insights ? deckTabsHtml(d) : ''}`;
+  if (tab === 'stats') html += statsHtml(d);
+  else if (tab === 'hand') html += handHtml(d);
   else BOARDS.forEach(([b, label]) => {
     const rows = d.cards.filter((e) => e.board === b && state.cards[e.cardId]).sort((a, z) => state.cards[a.cardId].name.localeCompare(state.cards[z.cardId].name));
     if (!rows.length) return;
@@ -757,10 +759,10 @@ function renderDeckDetail() {
         .replace('<li ', `<li data-foil="${e.foil ? 1 : 0}" data-board="${b}" `);
     }).join('') + '</ul>';
   });
-  if (!d.cards.length && deckTab === 'cards') html += `<p class="empty">Empty deck. Add cards from Search, scan them in, or import a list.</p>`;
+  if (!d.cards.length && tab === 'cards') html += `<p class="empty">Empty deck. Add cards from Search, scan them in, or import a list.</p>`;
   $('#deckDetail').innerHTML = html;
-  wireDeckTabs(d);
-  $('#deckBack').onclick = () => { openDeckId = null; renderDecks(); };
+  if (insights) wireDeckTabs(d);
+  $('#deckBack').onclick = () => { openDeckId = null; if (insights) deckTabFor = null; renderDecks(); };
   $('#deckAdd').onclick = () => { setView('search'); state.settings.searchDest = d.id; $('#searchInput').focus(); toast(`Tap a card, then Add → ${d.name}`); };
   $('#deckScan').onclick = () => { state.settings.dest = d.id; save(); renderDestSelect(); setView('scan'); };
   $('#deckCsv').onclick = () => downloadCsv(d.name, d.cards.map((e) => ({ ...e })));

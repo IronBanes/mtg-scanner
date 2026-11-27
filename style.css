@@ -59,7 +59,7 @@ textarea { min-height: 160px; font-family: ui-monospace, Menlo, monospace; font-
 .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
 .btn.ghost { background: transparent; }
 .btn.danger { color: var(--bad); border-color: #5a2b2b; background: transparent; }
-.btn.small { padding: 6px 10px; font-size: 13px; border-radius: 8px; }
+.btn.small { padding: 6px 12px; font-size: 13px; border-radius: 8px; min-height: 38px; }
 .btn.big { padding: 14px 24px; font-size: 17px; }
 .btn:disabled { opacity: .5; }
 .icon-btn { background: none; border: 0; font-size: 22px; padding: 4px 8px; cursor: pointer; color: var(--muted); }
@@ -132,7 +132,7 @@ ul.cards, ul.decks, ul.suggest { list-style: none; margin: 0; padding: 0; }
 .cards .p b { display: block; }
 .cards .p span { font-size: 12px; color: var(--muted); }
 .qty { display: inline-flex; align-items: center; gap: 2px; flex: none; }
-.qty button { width: 28px; height: 28px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel2); cursor: pointer; padding: 0; }
+.qty button { width: 40px; height: 40px; font-size: 18px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel2); cursor: pointer; padding: 0; }
 .qty b { min-width: 22px; text-align: center; font-variant-numeric: tabular-nums; }
 .badge { display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 4px; margin-left: 4px; vertical-align: 1px; }
 .badge.foil { background: var(--foil); color: #222; }

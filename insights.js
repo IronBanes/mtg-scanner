@@ -221,9 +221,14 @@ function secureRandom() { const a = new Uint32Array(1); crypto.getRandomValues(a
 
 // ---------------------------------------------------------------- UI: tabs inside a deck
 let deckTab = 'cards';
-let hand = null; // {deckId, library, hand, mulligans, bottomed, drawn}
+let deckTabFor = null; // deck the tab choice belongs to; opening another deck starts on Cards
+let hand = null; // {deckId, sig, library, hand, mulligans, bottomed, drawn}
+function syncDeckTab(d) { if (deckTabFor !== d.id) { deckTab = 'cards'; deckTabFor = d.id; } }
+/** Deck contents fingerprint: a test hand dealt from an older version of the deck is thrown away. */
+function deckSig(d) { return d.cards.filter((e) => e.board === 'main').map((e) => e.cardId + 'x' + e.qty).sort().join(','); }
 
-function deckTabsHtml() {
+function deckTabsHtml(d) {
+  syncDeckTab(d);
   return `<div class="seg deck-tabs" role="tablist">${[['cards', 'Cards'], ['stats', 'Stats'], ['hand', 'Test hand']]
     .map(([k, l]) => `<button class="seg-btn ${deckTab === k ? 'active' : ''}" data-decktab="${k}">${l}</button>`).join('')}</div>`;
 }
@@ -233,19 +238,24 @@ function wireDeckTabs(d) {
   if (deckTab === 'hand') wireHand(d);
 }
 
-/** Cards cached before this release lack keywords/legalities; fetch them once in the background. */
+/** Cards cached before this release lack keywords/legalities; fetch them in the background.
+    Each id is tried at most once per session, so an offline phone or a card Scryfall no longer
+    returns can't cause a fetch -> re-render -> fetch loop. */
 let detailFetch = null;
+const detailTried = new Set();
 function ensureCardDetails(d) {
-  const missing = [...new Set(d.cards.map((e) => e.cardId))].filter((id) => state.cards[id] && !state.cards[id].legal);
+  const missing = [...new Set(d.cards.map((e) => e.cardId))]
+    .filter((id) => state.cards[id] && !state.cards[id].legal && !detailTried.has(id));
   if (!missing.length || detailFetch) return false;
-  detailFetch = refreshPrices(missing).catch(() => toast('Couldn’t load card details — check your connection'))
-    .finally(() => { detailFetch = null; if (openDeckId === d.id) renderDeckDetail(); });
+  missing.forEach((id) => detailTried.add(id));
+  detailFetch = refreshPrices(missing).catch(() => toast('Couldn\u2019t load card details — check your connection'))
+    .finally(() => { detailFetch = null; if (openDeckId && deckTab === 'stats') renderDeckDetail(); });
   return true;
 }
 
 // ---------------------------------------------------------------- Stats tab
 function statsHtml(d) {
-  const loading = ensureCardDetails(d) || detailFetch;
+  const loading = ensureCardDetails(d) || !!detailFetch;
   const a = analyzeDeck(d.cards, state.cards, d.format);
   const max = Math.max(1, ...a.curve);
   const curve = a.curve.map((n, i) => `<div class="bar"><span class="bn">${n || ''}</span><i style="height:${(n / max) * 100}%"></i><span class="bl">${i === 7 ? '7+' : i}</span></div>`).join('');
@@ -310,7 +320,8 @@ function pickCommander(d) {
       : '<p class="muted">No legendary creatures in this deck yet.</p>'}
     <div class="row gap" style="margin-top:12px"><button class="btn primary grow" id="cmdSave">Save</button><button class="btn" id="cmdSearch">Search for one</button></div>`);
   $('#cmdSave').onclick = () => {
-    const ids = $$('.pick-list input:checked').map((i) => i.value);
+    const allowed = new Set(d.cards.map((e) => e.cardId));
+    const ids = $$('.pick-list input:checked').map((i) => i.value).filter((id) => allowed.has(id));
     if (ids.length > 2) return toast('Pick at most two');
     setCommanders(d, ids); save(); hideModal(); renderDeckDetail(); renderDecks();
   };
@@ -339,10 +350,11 @@ function setCommanders(d, ids) {
 // ---------------------------------------------------------------- Test hand tab
 function newHand(d) {
   const library = buildLibrary(d.cards, state.cards);
-  hand = { deckId: d.id, library, hand: library.splice(0, 7), mulligans: 0, bottomed: 0, drawn: 0 };
+  hand = { deckId: d.id, sig: deckSig(d), library, hand: library.splice(0, 7), mulligans: 0, bottomed: 0, drawn: 0 };
 }
+const MAX_MULLIGANS = 6;
 function handHtml(d) {
-  if (!hand || hand.deckId !== d.id) newHand(d);
+  if (!hand || hand.deckId !== d.id || hand.sig !== deckSig(d)) newHand(d);
   const total = d.cards.filter((e) => e.board === 'main').reduce((s, e) => s + e.qty, 0);
   if (total < 7) return `<p class="empty">Add at least 7 main-deck cards to draw a test hand.</p>`;
   const lands = d.cards.filter((e) => e.board === 'main' && state.cards[e.cardId] && primaryType(state.cards[e.cardId].type) === 'Land').reduce((s, e) => s + e.qty, 0);
@@ -351,7 +363,7 @@ function handHtml(d) {
   let p24 = 0; for (let k = 2; k <= 4; k++) p24 += hypergeom(total, lands, 7, k);
   return `<div class="row gap wrap">
       <button class="btn small primary" id="hNew">New hand</button>
-      <button class="btn small" id="hMull" ${toBottom > 0 ? 'disabled' : ''}>Mulligan</button>
+      <button class="btn small" id="hMull" ${toBottom > 0 || hand.mulligans >= MAX_MULLIGANS ? 'disabled' : ''}>Mulligan</button>
       <button class="btn small" id="hDraw" ${toBottom > 0 || !hand.library.length ? 'disabled' : ''}>Draw a card</button>
     </div>
     <p class="muted">${hand.hand.length} cards in hand · <b>${handLands}</b> land${handLands === 1 ? '' : 's'} · ${hand.library.length} left in library${hand.drawn ? ` · turn ${hand.drawn + 1}` : ''}${hand.mulligans ? ` · mulligan ${hand.mulligans}` : ''}</p>
@@ -364,18 +376,19 @@ function wireHand(d) {
   const on = (id, fn) => { const b = $(id); if (b) b.onclick = () => { fn(); renderDeckDetail(); }; };
   on('#hNew', () => newHand(d));
   on('#hMull', () => {
-    const m = H().mulligans + 1;
+    const m = Math.min(MAX_MULLIGANS, H().mulligans + 1);
     const library = buildLibrary(d.cards, state.cards);
-    hand = { deckId: d.id, library, hand: library.splice(0, 7), mulligans: m, bottomed: 0, drawn: 0 };
+    hand = { deckId: d.id, sig: deckSig(d), library, hand: library.splice(0, 7), mulligans: m, bottomed: 0, drawn: 0 };
   });
   on('#hDraw', () => { H().hand.push(H().library.shift()); H().drawn++; });
   $$('[data-hand]').forEach((b) => (b.onclick = () => {
-    const h = H();
+    const h = H(), i = Number(b.dataset.hand);
+    if (!Number.isInteger(i) || i < 0 || i >= h.hand.length) return;
     if (h.mulligans - h.bottomed > 0) {
-      const [id] = h.hand.splice(Number(b.dataset.hand), 1); h.library.push(id); h.bottomed++;
+      const [id] = h.hand.splice(i, 1); h.library.push(id); h.bottomed++;
       renderDeckDetail();
-    } else openCard(h.hand[Number(b.dataset.hand)]);
+    } else openCard(h.hand[i]);
   }));
 }
 
-window.__insights = { analyzeDeck, buildLibrary, hypergeom, pipsOf, primaryType, setCommanders, KEYWORD_INFO };
+window.__insights = { analyzeDeck, buildLibrary, hypergeom, pipsOf, primaryType, setCommanders, ensureCardDetails, deckSig, KEYWORD_INFO };
