@@ -81,10 +81,11 @@ function app({ raw, route, ocr = [], confirm = () => true, offlineStorage = fals
       return runInContext(name + '(...testArgs)', context);
     },
     advance(delay) {
-      const entry = [...timers].find(([, timer]) => timer.delay === delay);
-      assert.ok(entry, 'expected a pending timer for ' + delay + 'ms');
-      timers.delete(entry[0]);
-      entry[1].fn();
+      // fire every timer due at this delay: the scan loop's 150ms sleep and the 150ms save debounce
+      // can both be pending, and firing only the first one leaves the scan loop a frame behind
+      const due = [...timers].filter(([, timer]) => timer.delay === delay);
+      assert.ok(due.length, 'expected a pending timer for ' + delay + 'ms');
+      for (const [id, timer] of due) { timers.delete(id); timer.fn(); }
     },
     flush() {
       for (const [id, { fn }] of timers) { timers.delete(id); fn(); }
