@@ -718,6 +718,9 @@ test('synergyTags reads each theme out of real rules text (one make and one pay 
   assert.deepEqual(tags('CREATE A 1/1 GOBLIN TOKEN.'), ['tokens:make'], 'matching is case-insensitive');
   assert.deepEqual(tags('Whenever you sacrifice a creature, draw a card.'), ['sacrifice:pay'], 'a "Whenever you sacrifice" trigger is a payoff, not a cost');
   assert.deepEqual(tags('Trample, vigilance'), [], 'a vanilla creature gets no tags');
+  // review: discarding your own cards fills your graveyard; making an opponent discard does not
+  assert.deepEqual(tags('Draw two cards, then discard a card.'), ['graveyard:make']);
+  assert.deepEqual(tags('Target player reveals their hand. You choose a nonland card from it. That player discards that card.'), []);
   assert.deepEqual(tags(''), [], 'no rules text, no tags');
   assert.deepEqual(json(a.call('synergyTags', undefined, 'Creature', undefined)), [], 'missing pieces are tolerated');
 });

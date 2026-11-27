@@ -193,7 +193,8 @@ const SYNERGY_RULES = {
   graveyard: {
     name: 'Graveyard', thing: 'cards in your graveyard',
     desc: 'Filling your graveyard, and playing cards out of it.',
-    make: [/\bmill\b/i, /\bsurveil\b/i, /discard/i],
+    // "discard a card" is you filling your own graveyard; "target player discards" (hand attack) is not
+    make: [/\bmill\b/i, /\bsurveil\b/i, /\bdiscard (a|an|one|two|three|x|\d+|your|that|this|it)\b/i],
     pay: [/from your graveyard/i],
     makeKw: ['Mill', 'Surveil'], payKw: ['Flashback', 'Unearth', 'Escape', 'Delve', 'Disturb', 'Embalm', 'Eternalize'],
   },
