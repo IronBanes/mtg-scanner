@@ -117,6 +117,18 @@ function primaryType(type) {
 }
 function isBasic(card) { return /\bBasic\b/.test(card.type || ''); }
 function isBackground(card) { return /\bBackground\b/.test(String(card.type || '').split(' // ')[0]); }
+const PAIRS = { 'choose-background': 'background', background: 'choose-background', 'doctors-companion': 'doctor', doctor: 'doctors-companion' };
+/** Can these two cards be commanders together? Partner/Friends forever pair with their own kind,
+    "Partner with X" only with X, Choose a Background with a Background, Doctor's companion with a Doctor. */
+function validPair(a, b) {
+  // cards cached before release 5 only have the old partner flag
+  if (!('pairing' in a) || !('pairing' in b)) return !!(a.partner && b.partner);
+  const p = a.pairing, q = b.pairing;
+  if (!p || !q) return false;
+  if (p.kind === 'partner-with') return q.kind === 'partner-with' && p.name === b.name && q.name === a.name;
+  if (p.kind === 'partner' || p.kind === 'friends') return q.kind === p.kind;
+  return PAIRS[p.kind] === q.kind;
+}
 function pipsOf(mana) {
   const out = { W: 0, U: 0, B: 0, R: 0, G: 0 };
   for (const sym of String(mana || '').match(/\{[^}]+\}/g) || []) for (const c of COLORS) if (sym.includes(c)) out[c]++;
@@ -169,7 +181,7 @@ function analyzeDeck(entries, cards, format) {
 
   // legality
   const fmt = LIMITS[format] ? format : null;
-  const issues = [];
+  const issues = [], unchecked = new Set(); // unchecked: cards with no legality data yet (cached before release 5)
   if (fmt) {
     const lim = LIMITS[fmt];
     const size = count(played);
@@ -178,25 +190,31 @@ function analyzeDeck(entries, cards, format) {
     const side = count(rows.filter((r) => r.board === 'side'));
     if (side > lim.sideboard && fmt !== 'commander') issues.push({ kind: 'size', text: `Sideboard has ${side} cards; the limit is ${lim.sideboard}.` });
     if (fmt === 'commander' && !commanders.length) issues.push({ kind: 'commander', text: 'No commander chosen yet.' });
-    const byName = {};
+    const byName = {}, restricted = new Set();
     for (const r of rows.filter((x) => x.board !== 'maybe')) {
       const c = r.card, status = c.legal && c.legal[fmt];
+      if (!c.legal) unchecked.add(c.name);
       if (status === 'banned') issues.push({ kind: 'banned', card: c.name, text: `${c.name} is banned in ${fmt}.` });
       else if (status === 'not_legal') issues.push({ kind: 'not_legal', card: c.name, text: `${c.name} isn’t legal in ${fmt}.` });
+      else if (status === 'restricted') restricted.add(c.name);
       if (r.board !== 'side' || fmt !== 'commander') byName[c.name] = (byName[c.name] || 0) + r.qty;
-      if (fmt === 'commander' && identity.size && r.board !== 'commander' && (c.colors || []).some((x) => !identity.has(x)))
+      // a colorless commander still sets an identity: no colored cards at all
+      if (fmt === 'commander' && commanders.length && r.board !== 'commander' && (c.colors || []).some((x) => !identity.has(x)))
         issues.push({ kind: 'identity', card: c.name, text: `${c.name} is outside your commander’s colors.` });
     }
     for (const [name, n] of Object.entries(byName)) {
       const c = rows.find((r) => r.card.name === name).card;
-      if (n > lim.copies && !isBasic(c) && !c.anyNumber) issues.push({ kind: 'copies', card: name, text: `${n} copies of ${name}; the limit is ${lim.copies}.` });
+      if (isBasic(c) || c.anyNumber) continue;
+      // restricted (Vintage) means one copy; some cards set their own limit ("up to nine cards named Nazgûl")
+      const max = restricted.has(name) ? 1 : Math.max(lim.copies, c.copyLimit || 0);
+      if (n > max) issues.push({ kind: 'copies', card: name, text: `${n} copies of ${name}; the limit is ${max}${restricted.has(name) ? ' (restricted)' : ''}.` });
     }
     if (fmt === 'commander') {
-      // a Background can't lead alone, but is a legal second commander next to one that says "Choose a Background"
-      const pairedBackground = (r) => isBackground(r.card) && commanders.some((o) => o !== r && o.card.canCommand && o.card.partner);
-      for (const r of commanders) if (!r.card.canCommand && !pairedBackground(r)) issues.push({ kind: 'commander', card: r.card.name, text: `${r.card.name} can’t normally be a commander.` });
+      const pair = count(commanders) === 2 && commanders.length === 2 && validPair(commanders[0].card, commanders[1].card);
+      // a Background can't lead alone, but is a legal second commander in a valid pair
+      for (const r of commanders) if (!r.card.canCommand && !(pair && isBackground(r.card))) issues.push({ kind: 'commander', card: r.card.name, text: `${r.card.name} can’t normally be a commander.` });
       if (count(commanders) > 2) issues.push({ kind: 'commander', text: 'Only up to two commanders are allowed (with partner).' });
-      if (count(commanders) === 2 && !commanders.every((r) => r.card.partner)) issues.push({ kind: 'commander', text: 'Two commanders need partner (or a background) to be used together.' });
+      if (count(commanders) === 2 && !pair) issues.push({ kind: 'commander', text: 'These two commanders can’t be used together (they need matching partner, Background or Doctor abilities).' });
     }
   }
 
@@ -208,7 +226,7 @@ function analyzeDeck(entries, cards, format) {
     total: count(played), lands, nonland, curve,
     avgMv: nonland ? mvSum / nonland : 0,
     avgMvWithLands: count(played) ? mvSum / count(played) : 0,
-    highest, types, pips, sources, keywords, issues, legends,
+    highest, types, pips, sources, keywords, issues, unchecked: [...unchecked], legends,
     identity: [...identity], landAdvice: advice,
   };
 }
@@ -228,7 +246,10 @@ let deckTabFor = null; // deck the tab choice belongs to; opening another deck s
 let hand = null; // {deckId, sig, library, hand, mulligans, bottomed, drawn}
 function syncDeckTab(d) { if (deckTabFor !== d.id) { deckTab = 'cards'; deckTabFor = d.id; } }
 /** Deck contents fingerprint: a test hand dealt from an older version of the deck is thrown away. */
-function deckSig(d) { return d.cards.filter((e) => e.board === 'main').map((e) => e.cardId + 'x' + e.qty).sort().join(','); }
+function deckSig(d) {
+  // an uncached card isn't in the library, so it becoming cached (after a refresh) also redeals
+  return d.cards.filter((e) => e.board === 'main').map((e) => e.cardId + 'x' + e.qty + (state.cards[e.cardId] ? '' : '?')).sort().join(',');
+}
 
 function deckTabsHtml(d) {
   syncDeckTab(d);
@@ -281,9 +302,10 @@ function statsHtml(d) {
       ${commanders.length ? commanders.map((c) => `<div class="cmd"><img src="${esc(c.thumb)}" alt="" data-open="${esc(c.id)}"><div><b>${esc(c.name)}</b><div class="muted">${esc(c.type)}</div><div>${(c.colors || []).map((x) => `<span class="pip pip-${x}">${x}</span>`).join('') || '<span class="muted">Colorless</span>'}</div></div></div>`).join('') : '<p class="muted">No commander chosen. Pick one so color checks work.</p>'}
     </div>` : ''}
 
-    <div class="panel"><div class="panel-head"><h3>Legality${LIMITS[d.format] ? ` · ${esc(d.format)}` : ''}</h3>${LIMITS[d.format] ? (issues.length ? `<span class="badge-bad">${issues.length} issue${issues.length > 1 ? 's' : ''}</span>` : '<span class="badge-ok">Legal</span>') : ''}</div>
+    <div class="panel"><div class="panel-head"><h3>Legality${LIMITS[d.format] ? ` · ${esc(d.format)}` : ''}</h3>${LIMITS[d.format] ? (issues.length ? `<span class="badge-bad">${issues.length} issue${issues.length > 1 ? 's' : ''}</span>` : a.unchecked.length ? '<span class="badge-warn">Not fully checked</span>' : '<span class="badge-ok">Legal</span>') : ''}</div>
       ${!LIMITS[d.format] ? `<p class="muted">No legality rules for “${esc(d.format)}”. Change the format under Edit.</p>`
-        : issues.length ? `<ul class="issues">${issues.map((i) => `<li class="issue-${i.kind}">${esc(i.text)}</li>`).join('')}</ul>` : '<p class="ok">No problems found.</p>'}
+        : `${issues.length ? `<ul class="issues">${issues.map((i) => `<li class="issue-${i.kind}">${esc(i.text)}</li>`).join('')}</ul>` : a.unchecked.length ? '' : '<p class="ok">No problems found.</p>'}
+          ${a.unchecked.length ? `<p class="warn">${loading ? 'Still loading' : 'Couldn’t load'} legality for ${a.unchecked.length} card${a.unchecked.length > 1 ? 's' : ''}${loading ? '…' : ' — connect and tap Refresh prices to check them.'}</p>` : ''}`}
     </div>
 
     <div class="panel"><h3>Mana curve</h3>
@@ -342,7 +364,15 @@ function setCommanders(d, ids) {
     addTo(d.id, e.cardId, e.foil, e.qty, 'main');
   }
   for (const id of ids) {
-    if (d.cards.some((x) => x.board === 'commander' && x.cardId === id)) continue;
+    const current = d.cards.filter((x) => x.board === 'commander' && x.cardId === id);
+    if (current.length) {
+      // already a commander: keep exactly one copy, surplus (e.g. "2 Krenko" imported under Commander) goes to the main deck
+      current.forEach((e, i) => {
+        const extra = e.qty - (i === 0 ? 1 : 0);
+        if (extra > 0) { removeFrom(d.id, id, e.foil, extra, 'commander'); addTo(d.id, id, e.foil, extra, 'main'); }
+      });
+      continue;
+    }
     const src = d.cards.find((x) => x.cardId === id && x.board === 'main') || d.cards.find((x) => x.cardId === id);
     if (!src) continue;
     removeFrom(d.id, id, src.foil, 1, src.board);
@@ -358,7 +388,8 @@ function newHand(d) {
 const MAX_MULLIGANS = 6;
 function handHtml(d) {
   if (!hand || hand.deckId !== d.id || hand.sig !== deckSig(d)) newHand(d);
-  const total = d.cards.filter((e) => e.board === 'main').reduce((s, e) => s + e.qty, 0);
+  // same cards buildLibrary uses (main deck, card data cached), so the hand size, message and odds agree
+  const total = d.cards.filter((e) => e.board === 'main' && state.cards[e.cardId]).reduce((s, e) => s + e.qty, 0);
   if (total < 7) return `<p class="empty">Add at least 7 main-deck cards to draw a test hand.</p>`;
   const lands = d.cards.filter((e) => e.board === 'main' && state.cards[e.cardId] && primaryType(state.cards[e.cardId].type) === 'Land').reduce((s, e) => s + e.qty, 0);
   const handLands = hand.hand.filter((id) => primaryType(state.cards[id]?.type) === 'Land').length;

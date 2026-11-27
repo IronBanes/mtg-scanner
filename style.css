@@ -209,9 +209,10 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-siz
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
 .panel-head h3 { margin: 0; }
 .ok { color: var(--good); }
-.badge-ok, .badge-bad { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+.badge-ok, .badge-bad, .badge-warn { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
 .badge-ok { background: rgba(76,195,138,.15); color: var(--good); }
 .badge-bad { background: rgba(239,107,107,.15); color: var(--bad); }
+.badge-warn { background: rgba(240,180,80,.15); color: var(--accent); }
 .issues { margin: 0; padding-left: 18px; font-size: 14px; }
 .issues li { margin: 3px 0; }
 .issues .issue-banned, .issues .issue-not_legal, .issues .issue-identity { color: var(--bad); }

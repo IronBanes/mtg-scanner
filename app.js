@@ -136,6 +136,24 @@ async function sf(path, opts = {}) {
 }
 
 const LEGAL_FORMATS = ['commander', 'standard', 'pioneer', 'modern', 'legacy', 'vintage', 'pauper'];
+const NUMBER_WORDS = { two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+/** "A deck can have up to nine cards named Nazgûl." -> 9 (null when the card has no own limit). */
+function copyLimitOf(oracle) {
+  const m = /deck can have up to (\w+) cards named/i.exec(oracle);
+  return m ? NUMBER_WORDS[m[1].toLowerCase()] || Number(m[1]) || null : null;
+}
+/** How a commander may be paired with a second one: {kind, name?} or null. Kinds must match (see validPair in insights.js). */
+function pairingOf(keywords, oracle, frontType) {
+  const pw = /Partner with ([^\n(]+?)\s*(?:\(|\n|$)/.exec(oracle);
+  if (pw) return { kind: 'partner-with', name: pw[1].trim() };
+  if (keywords.includes('Partner')) return { kind: 'partner' };
+  if (keywords.includes('Friends forever') || /Friends forever/i.test(oracle)) return { kind: 'friends' };
+  if (/Choose a Background/i.test(oracle)) return { kind: 'choose-background' };
+  if (/\bBackground\b/.test(frontType)) return { kind: 'background' };
+  if (/Doctor.s companion/i.test(oracle)) return { kind: 'doctors-companion' };
+  if (/\bTime Lord Doctor\b/.test(frontType)) return { kind: 'doctor' };
+  return null;
+}
 function slim(c) {
   const face = c.card_faces && c.card_faces[0];
   const img = c.image_uris || (face && face.image_uris) || {};
@@ -149,6 +167,7 @@ function slim(c) {
     canCommand: /\bLegendary\b/.test(frontType) && (/\bCreature\b/.test(frontType) || /can be your commander/i.test(oracle)),
     partner: keywords.includes('Partner') || /Partner with|Choose a Background/i.test(oracle) || /\bBackground\b/.test(frontType),
     anyNumber: /deck can have any number of cards named/i.test(oracle),
+    copyLimit: copyLimitOf(oracle), pairing: pairingOf(keywords, oracle, frontType),
     id: c.id, name: c.name, set: c.set, set_name: c.set_name, cn: c.collector_number,
     rarity: c.rarity, type: c.type_line || (face && face.type_line) || '',
     mana: c.mana_cost ?? (face && face.mana_cost) ?? '', cmc: c.cmc,

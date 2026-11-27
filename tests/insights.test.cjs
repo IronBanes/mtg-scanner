@@ -28,6 +28,7 @@ const deck = (a, name, format, entries) => {
   return d;
 };
 const analyze = (a, d, format = d.format) => json(a.insights().analyzeDeck(d.cards, a.state().cards, format));
+const NOPAIR = 'These two commanders can’t be used together (they need matching partner, Background or Doctor abilities).';
 const kinds = (r) => r.issues.map((i) => i.kind).sort();
 const open = (a, d, tab) => {
   a.eval(`openDeckId = ${JSON.stringify(d.id)}`);
@@ -119,19 +120,82 @@ test('commander legality: partner pairs, too many commanders, and cards that can
     legend('p1', ['U'], { keywords: ['Partner'] }),
     legend('p2', ['B'], { keywords: ['Partner'] }),
     legend('bg-fan', ['G'], { oracle_text: 'Choose a Background' }),
+    legend('bg-fan2', ['R'], { oracle_text: 'Choose a Background' }),
     sfCard('bg', { type_line: 'Legendary Enchantment — Background', color_identity: ['G'] }),
+    legend('pw-a', ['W'], { keywords: ['Partner with'], oracle_text: 'Partner with pw-b (When this creature enters, target player may put pw-b into their hand from their library, then shuffle.)' }),
+    legend('pw-b', ['U'], { keywords: ['Partner with'], oracle_text: 'Partner with pw-a (When this creature enters, ...)' }),
+    legend('ff1', ['W'], { keywords: ['Friends forever'] }), legend('ff2', ['U'], { keywords: ['Friends forever'] }),
+    legend('doctor', ['U'], { type_line: 'Legendary Creature — Time Lord Doctor' }),
+    legend('companion', ['W'], { oracle_text: 'Doctor’s companion (You can have two commanders if the other is the Doctor.)' }),
     sfCard('grunt', { type_line: 'Creature — Human', color_identity: ['W'] }),
     basic('Plains', ['W']),
   ]);
   const cmdIssues = (entries) => analyze(a, deck(a, 'D', 'commander', entries)).issues.filter((i) => i.kind === 'commander').map((i) => i.text);
+  const pair = (x, y) => cmdIssues([[x, 1, 'commander'], [y, 1, 'commander'], ['Plains', 98]]);
   assert.deepEqual(cmdIssues([['p1', 1, 'commander'], ['p2', 1, 'commander'], ['Plains', 98]]), []);
   assert.deepEqual(cmdIssues([['bg-fan', 1, 'commander'], ['bg', 1, 'commander'], ['Plains', 98]]), []);
-  assert.deepEqual(cmdIssues([['solo', 1, 'commander'], ['p1', 1, 'commander'], ['Plains', 98]]),
-    ['Two commanders need partner (or a background) to be used together.']);
+  for (const [x, y] of [['pw-a', 'pw-b'], ['ff1', 'ff2'], ['doctor', 'companion']]) assert.deepEqual(pair(x, y), [], x + ' + ' + y);
+  for (const [x, y] of [['solo', 'p1'], ['bg-fan', 'bg-fan2'], ['p1', 'bg'], ['p1', 'pw-a'], ['p1', 'ff1'], ['pw-a', 'p1'], ['ff1', 'companion']]) {
+    const expected = y === 'bg' ? ['bg can’t normally be a commander.', NOPAIR] : [NOPAIR];
+    assert.deepEqual(pair(x, y), expected, x + ' + ' + y);
+  }
   assert.deepEqual(cmdIssues([['p1', 1, 'commander'], ['p2', 1, 'commander'], ['solo', 1, 'commander'], ['Plains', 97]]),
     ['Only up to two commanders are allowed (with partner).']);
   assert.deepEqual(cmdIssues([['grunt', 1, 'commander'], ['Plains', 99]]), ['grunt can’t normally be a commander.']);
   assert.deepEqual(cmdIssues([['bg', 1, 'commander'], ['Plains', 99]]), ['bg can’t normally be a commander.'], 'a Background cannot lead alone');
+});
+
+test('cards cached before release 5 (old partner flag only) still pair as before', () => {
+  const a = setup([]);
+  const { analyzeDeck } = a.insights();
+  const old = (id, partner) => ({ id, name: id, type: 'Legendary Creature — Elf', cmc: 2, colors: ['G'], legal: { commander: 'legal' }, canCommand: true, partner });
+  const cards = { x: old('x', true), y: old('y', true), z: old('z', false) };
+  const issues = (p, q) => json(analyzeDeck([{ cardId: p, qty: 1, board: 'commander' }, { cardId: q, qty: 1, board: 'commander' }], cards, 'commander'))
+    .issues.filter((i) => i.kind === 'commander');
+  assert.deepEqual(issues('x', 'y'), []);
+  assert.equal(issues('x', 'z').length, 1);
+});
+
+test('a colorless commander still flags colored cards', () => {
+  const a = setup([legend('karn', [], { type_line: 'Legendary Artifact Creature — Golem' }), sfCard('bolt', { color_identity: ['R'] }), sfCard('ring', { type_line: 'Artifact' })]);
+  const d = deck(a, 'Karn', 'commander', [['karn', 1, 'commander'], ['bolt', 1], ['ring', 1]]);
+  assert.deepEqual(analyze(a, d).issues.filter((i) => i.kind === 'identity').map((i) => i.card), ['bolt']);
+});
+
+test('restricted cards are limited to one copy; cards with their own limit (Nazgûl) use it', () => {
+  const a = setup([
+    sfCard('lotus', { type_line: 'Artifact', legalities: { ...LEGAL, vintage: 'restricted' } }),
+    sfCard('nazgul', { type_line: 'Creature — Wraith Knight', color_identity: ['B'], oracle_text: 'Deathtouch\nA deck can have up to nine cards named nazgul.' }),
+    sfCard('opt'), basic('Island', ['U']),
+  ]);
+  assert.equal(a.state().cards.nazgul.copyLimit, 9);
+  const vintage = (n, side = 0) => analyze(a, deck(a, 'V', 'vintage', [['lotus', n], ['lotus', side, 'side'], ['opt', 4], ['Island', 55]].filter((e) => e[1])))
+    .issues.map((i) => i.text);
+  assert.deepEqual(vintage(1), []);
+  assert.deepEqual(vintage(2), ['2 copies of lotus; the limit is 1 (restricted).']);
+  assert.deepEqual(vintage(1, 1), ['2 copies of lotus; the limit is 1 (restricted).'], 'main and sideboard count together');
+  const legacy = analyze(a, deck(a, 'L', 'legacy', [['lotus', 4], ['Island', 56]]));
+  assert.deepEqual(legacy.issues, [], 'restricted only matters where the card is restricted');
+
+  const cmd = (n) => analyze(a, deck(a, 'N', 'commander', [['nazgul', n]])).issues.filter((i) => i.kind === 'copies').map((i) => i.text);
+  assert.deepEqual(cmd(9), []);
+  assert.deepEqual(cmd(10), ['10 copies of nazgul; the limit is 9.']);
+});
+
+test('legality is not reported as Legal while some cards have no legality data', async () => {
+  const a = setup([sfCard('old', { legalities: undefined }), sfCard('opt'), basic('Island', ['U'])], { route: () => failure(503, 'offline') });
+  const d = deck(a, 'Old', 'modern', [['old', 4], ['opt', 4], ['Island', 52]]);
+  assert.deepEqual(analyze(a, d).unchecked, ['old']);
+  let html = open(a, d, 'stats');
+  assert.doesNotMatch(html, /badge-ok">Legal/);
+  assert.match(html, /Not fully checked/);
+  assert.match(html, /Still loading legality for 1 card…/);
+  await a.eval('detailFetch');
+  html = a.element('#deckDetail').innerHTML;
+  assert.doesNotMatch(html, /badge-ok">Legal/);
+  assert.match(html, /Couldn’t load legality for 1 card/);
+  const fresh = deck(a, 'Fresh', 'modern', [['opt', 4], ['Island', 56]]);
+  assert.match(open(a, fresh, 'stats'), /badge-ok">Legal/);
 });
 
 test('60-card legality: minimum size, sideboard limit, four copies, basics unlimited', () => {
@@ -187,6 +251,14 @@ test('setCommanders moves one copy in, returns old commanders to the main deck, 
   assert.deepEqual(boards(), ['commander:legx1', 'commander:otherx1f', 'main:legx1', 'main:oldx1']);
   set(['forged-id']);
   assert.deepEqual(boards(), ['main:legx2', 'main:oldx1', 'main:otherx1f']);
+});
+
+test('setCommanders keeps one commander copy and moves extras to the main deck with their foil', () => {
+  const a = setup([legend('krenko', ['R'])]);
+  const d = deck(a, 'Dup', 'commander', [['krenko', 2, 'commander'], ['krenko', 1, 'commander', true]]);
+  a.insights().setCommanders(d, ['krenko']);
+  const boards = json(d.cards).map(({ cardId, qty, board, foil }) => `${board}:${cardId}x${qty}${foil ? 'f' : ''}`).sort();
+  assert.deepEqual(boards, ['commander:krenkox1', 'main:krenkox1', 'main:krenkox1f']);
 });
 
 test('commander picker drops ids that are not in the deck and refuses more than two', () => {
@@ -280,6 +352,18 @@ test('deckSig only depends on the main deck, not entry order or other boards', (
   assert.equal(deckSig({ cards: [...base, { cardId: 'c', qty: 1, board: 'side' }, { cardId: 'd', qty: 1, board: 'maybe' }] }), sig);
   assert.notEqual(deckSig({ cards: [{ ...base[0], qty: 3 }, base[1]] }), sig);
   assert.notEqual(deckSig({ cards: [...base, { cardId: 'c', qty: 1, board: 'main' }] }), sig);
+  a.call('cache', sfCard('a'));
+  assert.notEqual(deckSig({ cards: base }), sig, 'a card becoming cached changes the library, so the signature too');
+});
+
+test('test hand size, message and odds only count cards with data, and redeal when one arrives', () => {
+  const a = setup([sfCard('a'), basic('Island', ['U'])]);
+  const d = deck(a, 'Partial', 'modern', [['a', 3], ['Island', 3], ['later', 1]]);
+  assert.match(open(a, d, 'hand'), /Add at least 7 main-deck cards/, 'six usable cards is not enough');
+  a.call('cache', sfCard('later'));
+  const html = open(a, d, 'hand');
+  assert.match(html, /7 cards in hand/);
+  assert.match(html, /With 3 lands in 7 cards/);
 });
 
 test('a test hand is redealt after the main deck changes', () => {
