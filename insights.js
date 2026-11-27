@@ -116,6 +116,7 @@ function primaryType(type) {
   return TYPE_ORDER.find((t) => front.includes(t)) || 'Other';
 }
 function isBasic(card) { return /\bBasic\b/.test(card.type || ''); }
+function isBackground(card) { return /\bBackground\b/.test(String(card.type || '').split(' // ')[0]); }
 function pipsOf(mana) {
   const out = { W: 0, U: 0, B: 0, R: 0, G: 0 };
   for (const sym of String(mana || '').match(/\{[^}]+\}/g) || []) for (const c of COLORS) if (sym.includes(c)) out[c]++;
@@ -191,7 +192,9 @@ function analyzeDeck(entries, cards, format) {
       if (n > lim.copies && !isBasic(c) && !c.anyNumber) issues.push({ kind: 'copies', card: name, text: `${n} copies of ${name}; the limit is ${lim.copies}.` });
     }
     if (fmt === 'commander') {
-      for (const r of commanders) if (!r.card.canCommand) issues.push({ kind: 'commander', card: r.card.name, text: `${r.card.name} can’t normally be a commander.` });
+      // a Background can't lead alone, but is a legal second commander next to one that says "Choose a Background"
+      const pairedBackground = (r) => isBackground(r.card) && commanders.some((o) => o !== r && o.card.canCommand && o.card.partner);
+      for (const r of commanders) if (!r.card.canCommand && !pairedBackground(r)) issues.push({ kind: 'commander', card: r.card.name, text: `${r.card.name} can’t normally be a commander.` });
       if (count(commanders) > 2) issues.push({ kind: 'commander', text: 'Only up to two commanders are allowed (with partner).' });
       if (count(commanders) === 2 && !commanders.every((r) => r.card.partner)) issues.push({ kind: 'commander', text: 'Two commanders need partner (or a background) to be used together.' });
     }
@@ -312,7 +315,7 @@ function wireStats(d) {
 }
 
 function pickCommander(d) {
-  const inDeck = d.cards.filter((e) => state.cards[e.cardId] && state.cards[e.cardId].canCommand && e.board !== 'maybe');
+  const inDeck = d.cards.filter((e) => state.cards[e.cardId] && (state.cards[e.cardId].canCommand || isBackground(state.cards[e.cardId])) && e.board !== 'maybe');
   const current = new Set(d.cards.filter((e) => e.board === 'commander').map((e) => e.cardId));
   showModal(`<h2>Choose commander</h2>
     <p class="muted">Pick one, or two if they both have partner (or one says “Choose a Background”).</p>
