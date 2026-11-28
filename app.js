@@ -76,7 +76,7 @@ const defaultState = () => ({
   collection: [],     // {cardId, foil, qty, added, trade?} — trade: copies of this entry for trade (0..qty, key absent when 0)
   decks: [],          // {id, name, format, created, cards:[{cardId, foil, qty, board}]}
   recent: [],         // {cardId, foil, t}
-  settings: { dest: 'none', sound: true, exact: true, searchOwned: false, tradeOnly: false },
+  settings: { dest: 'none', sound: true, exact: true, searchOwned: false, tradeOnly: false, oldCards: false },
 });
 let state = defaultState();
 function keepSafetyCopy(tag, raw) {
@@ -333,6 +333,7 @@ async function refreshPrices(ids) {
 
 // name lookups from OCR text, cached per session
 const lookupCache = new Map();
+const prefixCache = new Map(); // first word -> card names starting with it (Scryfall autocomplete)
 async function identifyByName(text) {
   const key = norm(text);
   if (key.length < 3) return null;
@@ -353,8 +354,25 @@ async function identifyByName(text) {
     const words = text.split(' ');
     if (words.length > 2) card = (await tryFuzzy(words.slice(1).join(' '))) || (await tryFuzzy(words.slice(0, -1).join(' ')));
   }
+  // Fuzzy search isn't spelling distance: glare turned "Spectral Sliver" into "spectral Shiver", and fuzzy said
+  // Spectral Shift. When the match is imperfect, list the names that start with the read's first long word and
+  // take the closest spelling if it's clearly closer. The name list is cached per word, so the glare reads of
+  // one card (which differ every frame but share "spectral") cost one extra request, not one per frame.
+  let unsure = false; // the re-check failed on the network: return the fuzzy match, but don't cache it
+  const fit = (name) => Math.max(levRatio(text, frontName(name)), levRatio(text, name));
+  const first = text.split(' ').find((w) => w.replace(/[^A-Za-z]/g, '').length >= 4);
+  if (card && first && fit(card.name) < 0.9) {
+    try {
+      const word = norm(first);
+      if (!prefixCache.has(word)) prefixCache.set(word, (await sf('/cards/autocomplete?q=' + encodeURIComponent(first))).data || []);
+      let best = null, bestFit = fit(card.name) + 0.05;
+      for (const n of prefixCache.get(word)) if (fit(n) > bestFit) { best = n; bestFit = fit(n); }
+      if (best) card = await sf('/cards/named?exact=' + encodeURIComponent(best));
+    } catch (e) { if (e.status !== 404) unsure = true; }
+  }
   const minRatio = key.length < 6 ? 0.8 : 0.6; // short reads must match closely
   if (card && levRatio(text, frontName(card.name)) < minRatio && levRatio(text, card.name) < minRatio) card = null;
+  if (unsure) return card;
   if (card || !netError) lookupCache.set(key, card);
   else throw new Error('Can’t reach Scryfall — check your connection');
   return card;
@@ -508,6 +526,20 @@ function parseSetLine(text) {
   return { num, sets };
 }
 
+/** Does an OCR read look like a card name rather than texture noise? Names are a few mostly-long words;
+    noise is many 1–2 letter scraps ("me SE BRO oer iy YE ZR gag"). Skipping noise saves Scryfall round trips,
+    which were most of the time spent on a failed frame. */
+function looksLikeName(text) {
+  const words = String(text).split(' ').filter(Boolean);
+  const letters = (w) => w.replace(/[^A-Za-z]/g, '').length;
+  const all = words.reduce((s, w) => s + letters(w), 0), long = words.reduce((s, w) => s + (letters(w) >= 3 ? letters(w) : 0), 0);
+  return all >= 3 && words.length <= 7 && long / all >= 0.6;
+}
+
+// The crop that read the last card: tried first next time, since cards in one session (and the second,
+// confirming frame of auto-scan) usually look alike. Saves the other attempts on most frames.
+let lastNameVariant = 0;
+
 /**
  * Run the full identify pipeline on an image source with the card at `card` (pixel rect).
  * Returns {card (scryfall object), text} or {card:null, text}.
@@ -517,8 +549,10 @@ async function identifyFrom(src, rect, { exact = state.settings.exact, oldFrame 
   let card = null, text = '', firstText = '';
   // gray crops by zone + settings: a thresholded variant reuses its gray twin instead of redoing crop and blur
   const grays = new Map();
+  const order = [lastNameVariant, ...NAME_VARIANTS.keys()].filter((i, k, all) => all.indexOf(i) === k && NAME_VARIANTS[i]);
   // a few crop/cleanup variants; stop at the first one that matches a real card
-  for (const v of NAME_VARIANTS) {
+  for (const vi of order) {
+    const v = NAME_VARIANTS[vi];
     if (v.channel === 'min' && !oldFrame) continue; // old-frame crops: skipped when the caller wants a quick pass
     await w.setParameters({ tessedit_pageseg_mode: '6', tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',- " });
     const key = JSON.stringify([v.zone, v.invert ?? null, v.channel || 'lum', v.smooth || 0]);
@@ -529,9 +563,11 @@ async function identifyFrom(src, rect, { exact = state.settings.exact, oldFrame 
     text = cleanName(data.text);
     // old-frame crops read texture as short junk on an empty table: only look up longer reads from them
     if (text.replace(/[^A-Za-z]/g, '').length < (v.channel === 'min' ? 6 : 3)) continue;
+    if (!looksLikeName(text)) continue; // noise: no Scryfall lookup, and not reported as "read something"
     firstText = firstText || text;
     card = await identifyByName(text);
-    if (card) break;
+    // promote this crop only on a clean read: one lucky match from a loose, noisy crop shouldn't lead from now on
+    if (card) { if (levRatio(text, frontName(card.name)) >= 0.8) lastNameVariant = vi; break; }
   }
   if (!card) return { card: null, text: firstText };
   if (exact) {
@@ -553,8 +589,69 @@ async function identifyFrom(src, rect, { exact = state.settings.exact, oldFrame 
   return { card, text };
 }
 
+/** Edge strength profiles of a gray W×H image: col[x] sums |left-right| change over the middle rows (vertical
+    edges), row[y] sums |up-down| change over the middle columns (horizontal edges). Pure, for testing. */
+function edgeProfiles(L, W, H) {
+  const col = new Float32Array(W), row = new Float32Array(H);
+  for (let y = Math.round(H * 0.2); y < H * 0.8; y++) for (let x = 1; x < W - 1; x++) col[x] += Math.abs(L[y * W + x + 1] - L[y * W + x - 1]);
+  for (let x = Math.round(W * 0.2); x < W * 0.8; x++) for (let y = 1; y < H - 1; y++) row[y] += Math.abs(L[(y + 1) * W + x] - L[(y - 1) * W + x]);
+  return { col, row };
+}
+/** The strongest pair of edges in a profile whose distance is `size` (±6%): {a, b, s} or null. */
+function edgePair(arr, size) {
+  let max = 0, sum = 0; for (const v of arr) { max = Math.max(max, v); sum += v; }
+  if (!(max > 2.5 * (sum / arr.length))) return null; // nothing stands out (flat or evenly busy): no card edges
+  const peaks = []; for (let i = 1; i < arr.length - 1; i++) if (arr[i] >= arr[i - 1] && arr[i] >= arr[i + 1] && arr[i] >= max * 0.3) peaks.push(i);
+  let best = null;
+  for (const a of peaks) for (const b of peaks) if (b > a && Math.abs((b - a) / size - 1) < 0.06 && (!best || arr[a] + arr[b] > best.s)) best = { a, b, s: arr[a] + arr[b] };
+  return best;
+}
+/**
+ * Find the card's real edges near the guide (a card that isn't lined up exactly): straight edges a card's
+ * height apart (`sizes`: 70–125% of the guide by default), then a pair a card's width apart. Both pairs must
+ * exist, so a single strong line (a desk seam, a deck box) isn't taken for a card. Returns a source-pixel rect
+ * inside the source, or null when nothing card-shaped stands out or the card runs off the image.
+ */
+function findCardEdges(src, guide, srcW, srcH, { sizes = [0.7, 1.25] } = {}) {
+  const ar = 63 / 88, pad = 0.15;
+  const x0 = Math.max(0, guide.x - guide.w * pad), y0 = Math.max(0, guide.y - guide.h * pad);
+  const rw = Math.min(srcW, guide.x + guide.w * (1 + pad)) - x0, rh = Math.min(srcH, guide.y + guide.h * (1 + pad)) - y0;
+  if (!(rw > 0 && rh > 0)) return null;
+  const W = 200, H = Math.max(2, Math.round((W * rh) / rw)), k = rw / W;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(src, x0, y0, rw, rh, 0, 0, W, H);
+  const d = g.getImageData(0, 0, W, H).data, L = new Float32Array(W * H);
+  for (let p = 0; p < W * H; p++) L[p] = grayOf(d[p * 4], d[p * 4 + 1], d[p * 4 + 2]);
+  const { col, row } = edgeProfiles(L, W, H);
+  let tb = null;
+  for (let f = sizes[0]; f <= sizes[1] + 1e-9; f += 0.02) { const p = edgePair(row, (guide.h * f) / k); if (p && (!tb || p.s > tb.s)) tb = p; }
+  if (!tb) return null;
+  const hN = tb.b - tb.a, lr = edgePair(col, hN * ar);
+  if (!lr) return null; // no matching side edges: not clearly a card
+  const r = { x: x0 + lr.a * k, y: y0 + tb.a * k, w: (lr.b - lr.a) * k, h: hN * k };
+  // stay inside the image: a box that runs off it would darken the crop and cut the name
+  return r.x >= 0 && r.y >= 0 && r.x + r.w <= srcW && r.y + r.h <= srcH ? r : null;
+}
+/**
+ * Read the card in `guide`, and if that fails, look for the card's real edges and read again there, but only
+ * when they're noticeably off the guide. Lining the card up costs nothing extra; a card that's a bit off, too
+ * small or too big in the guide gets a second chance. Returns identifyFrom's result plus the rect that worked.
+ */
+async function identifyNearGuide(src, guide, srcW, srcH, opts = {}, { retry = true, sizes } = {}) {
+  const first = await identifyFrom(src, guide, opts);
+  if (first.card || !retry) return first;
+  const found = findCardEdges(src, guide, srcW, srcH, { sizes });
+  const off = found && (Math.abs(found.y - guide.y) > guide.h * 0.03 || Math.abs(found.h - guide.h) > guide.h * 0.05
+    || Math.abs(found.x - guide.x) > guide.w * 0.04);
+  if (!off) return first;
+  const again = await identifyFrom(src, found, opts);
+  // keep the retry's text when the guide read nothing, so "Couldn't match…" and the glare hint still see it
+  return again.card || !first.text ? again : first;
+}
+
 // ---------------------------------------------------------------- camera
-const cam = { stream: null, running: false, auto: false, busy: false, lastSeen: null, lastAdded: null, gap: true, wake: null, oldTurn: false, misses: 0 };
+const cam = { stream: null, running: false, auto: false, busy: false, lastSeen: null, lastAdded: null, gap: true, wake: null, misses: 0, foundAt: 0 };
 
 function guideRectInVideo() {
   const v = $('#video'), box = $('#camera').getBoundingClientRect(), gr = $('#guide').getBoundingClientRect();
@@ -572,6 +669,7 @@ async function startCamera() {
       audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 } },
     });
     const v = $('#video'); v.srcObject = cam.stream; await v.play();
+    $('#camera').scrollIntoView?.({ block: 'center', behavior: 'smooth' }); // bring the camera into view, clear of the top bar
     try { const [track] = cam.stream.getVideoTracks(); const caps = track.getCapabilities?.() || {};
       if (caps.focusMode?.includes('continuous')) await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch {}
     $('#camMsg').classList.add('hidden');
@@ -598,7 +696,7 @@ async function scanOnce() {
   const rect = guideRectInVideo(); if (!rect) return;
   cam.busy = true; $('#shutterBtn').disabled = true; status('Reading card…');
   try {
-    const { card, text } = await identifyFrom($('#video'), rect);
+    const v = $('#video'), { card, text } = await identifyNearGuide(v, rect, v.videoWidth, v.videoHeight);
     if (card) { beep(); showResult(cache(card), text); status(''); }
     else { status(text ? `Couldn't match "${text}" — try again, or tap Type` : 'No card name found — fill the frame & hold steady'); beep(300); }
   } catch (e) { status('Error: ' + e.message); }
@@ -613,8 +711,14 @@ async function startAuto() {
   status('Auto-scan on — show cards one at a time');
   loopAuto();
 }
+/** Color the guide outline: 'seeing' (a card is read, hold still), 'found' (added), 'glare' (can't read the name), or none. */
+function outline(mode) {
+  const c = $('#camera').classList;
+  for (const m of ['seeing', 'found', 'glare']) c.remove(m);
+  if (mode) c.add(mode);
+}
 function stopAuto() {
-  cam.auto = false; $('#camera').classList.remove('found');
+  cam.auto = false; outline(null);
   $('#autoBtn').textContent = 'Start auto-scan'; $('#autoBtn').classList.add('primary');
   try { cam.wake && cam.wake.release(); } catch {} cam.wake = null;
 }
@@ -624,29 +728,35 @@ async function loopAuto() {
     if (!rect || cam.busy) { await sleep(300); continue; }
     cam.busy = true;
     try {
-      // Old-frame crops add two OCR passes to every miss, so with nothing in view they run on every other
-      // frame only. While a card is being seen, or was just added and the frame hasn't emptied, they run every
-      // frame: an old card can then be confirmed twice, and a skipped frame can't fake an empty table.
-      const oldFrame = cam.lastSeen !== null || !cam.gap || (cam.oldTurn = !cam.oldTurn);
-      const { card, text } = await identifyFrom($('#video'), rect, { exact: state.settings.exact, oldFrame });
+      // Old-frame crops add two OCR passes to every miss, so auto-scan only uses them when "Scanning old cards"
+      // is on in Settings. The shutter and Photo buttons always try them.
+      const v = $('#video'), { card, text } = await identifyNearGuide(v, rect, v.videoWidth, v.videoHeight, { exact: state.settings.exact, oldFrame: !!state.settings.oldCards },
+        { retry: (cam.misses || 0) % 2 === 0 }); // edge retry on every other miss, so a busy table can't double every frame
       if (!cam.auto) break;
       if (!card) {
         // one unreadable frame (a flicker, or a flaky old-frame read) is not an empty table: only two misses in a
         // row count as a gap, so a card that stays in view isn't added again
         cam.misses = (cam.misses || 0) + 1;
         if (cam.misses >= 2) cam.gap = true;
-        cam.lastSeen = null; $('#camera').classList.remove('found');
-        status(text ? `Reading… "${text}"` : 'Waiting for a card…');
+        cam.lastSeen = null;
+        // text but no match, several frames running: usually glare across the name (foils, sleeves)
+        const glare = !!text && cam.misses >= 3;
+        outline(glare ? 'glare' : null);
+        status(glare ? 'Can’t read the name — tilt the card a little to move the glare off it'
+          : text ? `Reading… "${text}"` : 'Waiting for a card…');
       } else {
         cam.misses = 0;
         // need the same card twice in a row; re-add the same name only after the frame changed
         if (cam.lastSeen === card.id && (cam.gap || cam.lastAdded !== card.oracle_id)) {
           const s = cache(card); addScanned(s, { quiet: true }); beep();
           cam.lastAdded = card.oracle_id; cam.gap = false;
-          $('#camera').classList.add('found'); status(`✓ ${s.name} — ${money(unitPrice(s, foilOn()))}. Next card!`);
-          setTimeout(() => $('#camera').classList.remove('found'), 600);
+          outline('found'); status(`✓ ${s.name} — ${money(unitPrice(s, foilOn()))}. Next card!`);
+          const at = (cam.foundAt = Date.now()); // only this add's timer may clear its green
+          setTimeout(() => cam.foundAt === at && $('#camera').classList.contains('found') && outline(null), 600);
         } else if (cam.lastAdded !== card.oracle_id || cam.gap) {
-          status(`Seeing ${card.name}…`);
+          outline('seeing'); status(`Seeing ${card.name}… hold still`);
+        } else if (!$('#camera').classList.contains('found')) {
+          outline(null); // the card already added is still in view: nothing to hold still for
         }
         cam.lastSeen = card.id;
       }
@@ -665,7 +775,9 @@ async function scanPhoto(file) {
   const rect = { x: (W - w) / 2, y: (H - h) / 2, w, h };
   status('Reading photo…');
   try {
-    const { card, text } = await identifyFrom(img, rect);
+    // the centered box spans the photo: look for a card 60–105% of its size (on a real photo of a card filling
+    // ~79% of the frame this found it within 2%; going down to 35% picked up false edge pairs)
+    const { card, text } = await identifyNearGuide(img, rect, W, H, {}, { sizes: [0.6, 1.05] });
     if (card) { beep(); showResult(cache(card), text); status(''); }
     else status(text ? `Couldn't match "${text}" — crop the photo to the card, or tap Type` : 'No card name found in photo');
   } catch (e) { status('Error: ' + e.message); }
@@ -1275,6 +1387,8 @@ function openSettings() {
   const bytes = (localStorage.getItem(STORE_KEY) || '').length;
   showModal(`<h2>Settings & backup</h2>
     <label class="toggle"><input type="checkbox" id="setSound" ${state.settings.sound ? 'checked' : ''}> Beep when a card is recognized</label>
+    <label class="toggle"><input type="checkbox" id="setOldCards" ${state.settings.oldCards ? 'checked' : ''}> Scanning old cards (1993–2003)</label>
+    <p class="muted">Auto-scan then also tries the old-card name reading on every frame. It's slower, so leave it off for newer cards. The shutter and Photo buttons always try it.</p>
     <p class="muted">“Exact printing” on the Scan tab also reads the set code / collector number at the bottom of newer cards (2015+) so the right version and price are picked. Turn it off for faster scanning.</p>
     <h3>Backup</h3>
     <p class="muted">Your data lives only on this phone (${(bytes / 1024).toFixed(0)} KB). Export a backup now and then — it's one file you can save to iCloud Drive / Files.</p>
@@ -1292,6 +1406,7 @@ function openSettings() {
     a.download = 'mtg-scanner-' + b.dataset.safety.slice(BACKUP_PREFIX.length) + '.json'; a.click();
   }));
   $('#setSound').onchange = (e) => { state.settings.sound = e.target.checked; save(); };
+  $('#setOldCards').onchange = (e) => { state.settings.oldCards = e.target.checked; save(); };
   $('#bkExport').onclick = async () => {
     const file = new File([JSON.stringify({ app: 'mtgscan', v: 1, at: new Date().toISOString(), ...persistable() })], `mtg-scanner-backup-${new Date().toISOString().slice(0, 10)}.json`, { type: 'application/json' });
     if (navigator.canShare && navigator.canShare({ files: [file] })) { try { await navigator.share({ files: [file] }); return; } catch (e) { if (e.name === 'AbortError') return; } }
@@ -1463,4 +1578,4 @@ function init() {
 init();
 
 // exposed for testing in the console
-window.__mtg = { cropForOcr, grayOf, boxBlur, identifyFrom, cleanName, parseSetLine, parseList, toCsv, synergyTags, SYNERGY_RULES, state: () => state };
+window.__mtg = { cropForOcr, findCardEdges, identifyNearGuide, grayOf, boxBlur, identifyFrom, cleanName, parseSetLine, parseList, toCsv, synergyTags, SYNERGY_RULES, state: () => state };

@@ -14,7 +14,7 @@ test('loads legacy data with default settings and persists only cards in use', (
     recent: [{ cardId: 'scanned' }],
     decks: [{ id: 'deck', name: 'My deck', cards: [{ cardId: 'decked', qty: 1, board: 'main' }] }],
   })) });
-  assert.deepEqual(json(a.state().settings), { dest: 'none', sound: true, exact: false, searchOwned: false, tradeOnly: false });
+  assert.deepEqual(json(a.state().settings), { dest: 'none', sound: true, exact: false, searchOwned: false, tradeOnly: false, oldCards: false });
   a.call('addTo', 'collection', 'owned', false, 2);
   a.flush();
   const data = JSON.parse(a.stored.get(storageKey));
@@ -351,6 +351,103 @@ test('boxBlur averages a gray channel in place and leaves radius 0 alone', () =>
   assert.deepEqual(same, strip);
 });
 
+test('findCardEdges finds a card that sits off the guide, and nothing on a flat image', () => {
+  // source 1000x1400, guide at (200,200) 600x838; the real card is 50 px right and 100 px lower
+  // findCardEdges samples the guide plus 15% into a 200-px-wide canvas: x0 = 110, y0 ≈ 74.3, scale ≈ 3.9
+  const guide = { x: 200, y: 200, w: 600, h: 838 };
+  const a = app({ pixels: (w, h) => {
+    const d = new Uint8ClampedArray(w * h * 4), k = 780 / w;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const sx = 110 + x * k, sy = 74.3 + y * k, inCard = sx >= 250 && sx < 850 && sy >= 300 && sy < 1138;
+      const v = inCard ? 40 : 220; d.set([v, v, v, 255], (y * w + x) * 4);
+    }
+    return d;
+  } });
+  const r = json(a.call('findCardEdges', {}, guide, 1000, 1400));
+  for (const [key, want] of Object.entries({ x: 250, y: 300, w: 600, h: 838 })) {
+    assert.ok(Math.abs(r[key] - want) < 12, `${key} ${Math.round(r[key])} ≈ ${want}`);
+  }
+  assert.equal(app().call('findCardEdges', {}, guide, 1000, 1400), null, 'flat image: no card edges');
+});
+
+test('identifyNearGuide reads the guide first and only retries at detected edges when they are off', async () => {
+  const opts = { exact: false, oldFrame: false };
+  // flat pixels: no edges, so a failed guide read is final (4 reads, no second set)
+  const a = app({ ocr: ['', '', '', ''], route: () => ok(card()) });
+  assert.equal((await a.call('identifyNearGuide', {}, { x: 0, y: 0, w: 200, h: 280 }, 200, 280, opts)).card, null);
+  // a read in the guide returns at once
+  const b = app({ ocr: ['Sol Ring'], route: () => ok(card()) });
+  assert.equal((await b.call('identifyNearGuide', {}, { x: 0, y: 0, w: 200, h: 280 }, 200, 280, opts)).card.name, 'Sol Ring');
+  // review (Sonnet): the real retry. The card sits 50 px right and 100 px low of the guide; the guide read fails
+  // (4 empty reads), the edges are found off the guide, and the read there finds the card
+  const guide = { x: 200, y: 200, w: 600, h: 838 };
+  const offset = (w, h) => {
+    const d = new Uint8ClampedArray(w * h * 4), k = 780 / w;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const sx = 110 + x * k, sy = 74.3 + y * k, v = sx >= 250 && sx < 850 && sy >= 300 && sy < 1138 ? 40 : 220;
+      d.set([v, v, v, 255], (y * w + x) * 4);
+    }
+    return d;
+  };
+  const c = app({ ocr: ['', '', '', '', 'Sol Ring'], route: () => ok(card()), pixels: offset });
+  assert.equal((await c.call('identifyNearGuide', {}, guide, 1000, 1400, opts)).card.name, 'Sol Ring', 'found at the detected edges');
+  // retry: false (auto-scan on alternate misses) stops after the guide read
+  const d = app({ ocr: ['', '', '', '', 'Sol Ring'], route: () => ok(card()), pixels: offset });
+  assert.equal((await d.call('identifyNearGuide', {}, guide, 1000, 1400, opts, { retry: false })).card, null);
+});
+
+test('review: findCardEdges rejects a card box that runs off the image', () => {
+  // the same offset card, but the source is only 820 px wide, so its right edge (850) is off the image
+  const a = app({ pixels: (w, h) => {
+    const d = new Uint8ClampedArray(w * h * 4), rw = Math.min(820, 200 + 600 * 1.15) - 110, k = rw / w;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const sx = 110 + x * k, sy = 74.3 + y * k, v = sx >= 250 && sy >= 300 && sy < 1138 ? 40 : 220;
+      d.set([v, v, v, 255], (y * w + x) * 4);
+    }
+    return d;
+  } });
+  assert.equal(a.call('findCardEdges', {}, { x: 200, y: 200, w: 600, h: 838 }, 820, 1400), null);
+});
+
+test('looksLikeName keeps card names and drops texture noise', () => {
+  const a = app();
+  for (const t of ['Sol Ring', 'Opt', 'Wrath of God', 'Swords to Plowshares', 'spectral Shiver fs', 'Circle of Protection Black']) assert.ok(a.call('looksLikeName', t), t);
+  for (const t of ['me SE BRO oer iy YE ZR gag, Ds', 'TD A ol EA FAR BA Oe SPR Ba AFT RR Se', 'ab', '']) assert.ok(!a.call('looksLikeName', t), t);
+});
+
+test('a noisy read is not looked up on Scryfall', async () => {
+  const a = app({ ocr: ['me SE BRO oer iy YE ZR gag, Ds', '', '', ''], route: () => ok(card()) });
+  const result = await a.call('identifyFrom', {}, { x: 0, y: 0, w: 200, h: 280 }, { exact: false, oldFrame: false });
+  assert.equal(result.card, null);
+  assert.equal(a.requests.length, 0);
+});
+
+test('an imperfect fuzzy match is re-ranked by spelling among names with the same first word', async () => {
+  // glare read "spectral Shiver": fuzzy says Spectral Shift, but Spectral Sliver is the closer spelling
+  const sliver = card('sliver', { name: 'Spectral Sliver', oracle_id: 'sliver-oracle' });
+  const a = app({ route: (url) => {
+    if (url.pathname === '/cards/named' && url.searchParams.get('fuzzy')) return ok(card('shift', { name: 'Spectral Shift', oracle_id: 'shift-oracle' }));
+    if (url.pathname === '/cards/autocomplete') return ok({ data: ['Spectral Lynx', 'Spectral Shift', 'Spectral Sliver', 'Spectral Shepherd'] });
+    if (url.pathname === '/cards/named' && url.searchParams.get('exact') === 'Spectral Sliver') return ok(sliver);
+    return failure(404);
+  } });
+  assert.equal((await a.call('identifyByName', 'spectral Shiver')).name, 'Spectral Sliver');
+  assert.equal(a.requests[1].url.searchParams.get('q'), 'spectral', 'autocomplete on the first long word');
+  // an exact read needs no re-check
+  const b = app({ route: () => ok(card()) });
+  await b.call('identifyByName', 'Sol Ring');
+  assert.equal(b.requests.length, 1);
+});
+
+test('the crop that read the last card is tried first next time', async () => {
+  // first scan: crops 1-2 read nothing, crop 3 reads the name; second scan: crop 3 goes first and reads it at once
+  const a = app({ ocr: ['', '', 'Sol Ring', 'Sol Ring'], route: () => ok(card()) });
+  const rect = { x: 0, y: 0, w: 200, h: 280 };
+  assert.equal((await a.call('identifyFrom', {}, rect, { exact: false })).card.name, 'Sol Ring');
+  assert.equal(a.eval('lastNameVariant'), 2);
+  assert.equal((await a.call('identifyFrom', {}, rect, { exact: false })).card.name, 'Sol Ring', 'one OCR read was enough');
+});
+
 test('name lookup caches matches and definitive misses, but retries transient failures', async () => {
   let recover = false;
   const a = app({ route: (url) => {
@@ -393,10 +490,10 @@ test('search ranks an exact match first, appends pages, and shows an empty resul
 test('auto-scan needs consecutive reads and only adds the same card again after a gap', async () => {
   const a = app({
     mediaDevices: { getUserMedia: async () => ({ getVideoTracks: () => [] }) },
-    // A failed read tries all six crop variants (four modern-frame, two old-frame) right after a card was seen.
+    // A failed read tries the four modern-frame crops (old-card mode is off by default in Settings).
     // One empty frame is only a flicker (no re-add); two in a row are a gap, after which the same card adds again.
-    ocr: ['Sol Ring', 'Sol Ring', 'Sol Ring', ...Array(6).fill(''), 'Sol Ring', 'Sol Ring',
-      ...Array(6).fill(''), ...Array(6).fill(''), 'Sol Ring', 'Sol Ring'],
+    ocr: ['Sol Ring', 'Sol Ring', 'Sol Ring', ...Array(4).fill(''), 'Sol Ring', 'Sol Ring',
+      ...Array(4).fill(''), ...Array(4).fill(''), 'Sol Ring', 'Sol Ring'],
     route: () => ok(card()),
   });
   a.state().settings.exact = false;
@@ -419,6 +516,64 @@ test('auto-scan needs consecutive reads and only adds the same card again after 
     a.element('#autoBtn').onclick();
     a.flush();
   }
+});
+
+test('auto-scan uses the old-frame crops only with "Scanning old cards" on, and hints at glare after repeated misses', async () => {
+  const run = async (oldCards, ocr, frames) => {
+    const a = app({ mediaDevices: { getUserMedia: async () => ({ getVideoTracks: () => [] }) }, ocr, route: () => failure(404) });
+    Object.assign(a.state().settings, { exact: false, sound: false, oldCards });
+    Object.assign(a.element('#video'), { videoWidth: 200, videoHeight: 280, play: async () => {} });
+    for (const s of ['#camera', '#guide']) a.element(s).getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 280 });
+    await a.element('#autoBtn').onclick();
+    try {
+      for (let f = 0; f < frames; f++) { if (f) a.advance(150); await new Promise((r) => setImmediate(r)); }
+      return { left: ocr.length, status: a.element('#scanStatus').textContent };
+    } finally { a.element('#autoBtn').onclick(); a.flush(); }
+  };
+  // off (default): a missed frame is 4 OCR reads; 8 queued reads = exactly 2 frames
+  const off = await run(false, Array(8).fill(''), 2);
+  assert.equal(off.left, 0);
+  assert.doesNotMatch(off.status, /Error/, 'six reads per frame would run out of queued reads and show an error');
+  // on: 6 reads per missed frame; after 2 frames, 0 left of 12
+  assert.equal((await run(true, Array(12).fill(''), 2)).left, 0);
+  // three frames that read something but match nothing: tilt hint
+  const glare = await run(false, Array(12).fill('Spectral Shiver'), 3);
+  assert.match(glare.status, /tilt the card/);
+  // review (Sonnet): an empty table that OCRs as noise is not glare; keep "Waiting for a card…"
+  const empty = await run(false, Array(12).fill('me SE BRO oer iy YE ZR gag'), 3);
+  assert.equal(empty.status, 'Waiting for a card…');
+});
+
+test('the guide outline shows amber while reading, red for glare, and clears on an empty frame', async () => {
+  const a = app({ mediaDevices: { getUserMedia: async () => ({ getVideoTracks: () => [] }) },
+    ocr: ['Sol Ring', ...Array(12).fill('Spectral Shiver'), '', '', '', ''],
+    route: (url) => (url.searchParams.get('fuzzy') === 'Sol Ring' ? ok(card()) : failure(404)) });
+  Object.assign(a.state().settings, { exact: false, sound: false });
+  Object.assign(a.element('#video'), { videoWidth: 200, videoHeight: 280, play: async () => {} });
+  for (const s of ['#camera', '#guide']) a.element(s).getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 280 });
+  const cls = () => ['seeing', 'found', 'glare'].filter((c) => a.element('#camera').classList.contains(c)).join() || 'none';
+  const seen = [];
+  await a.element('#autoBtn').onclick();
+  try {
+    for (let f = 0; f < 5; f++) { if (f) a.advance(150); await new Promise((r) => setImmediate(r)); seen.push(cls()); }
+  } finally { a.element('#autoBtn').onclick(); a.flush(); }
+  // frame 1: Sol Ring read once (amber), frames 2-4: unreadable text (red from the 3rd), frame 5: empty
+  assert.deepEqual(seen, ['seeing', 'none', 'none', 'glare', 'none']);
+});
+
+test('review: a failed re-rank returns the fuzzy match without caching it; the name list is cached per word', async () => {
+  let acCalls = 0, acDown = true;
+  const a = app({ route: (url) => {
+    if (url.pathname === '/cards/named' && url.searchParams.get('fuzzy')) return ok(card('shift', { name: 'Spectral Shift', oracle_id: 'shift-oracle' }));
+    if (url.pathname === '/cards/autocomplete') { acCalls++; return acDown ? failure(503) : ok({ data: ['Spectral Shift', 'Spectral Sliver'] }); }
+    if (url.searchParams.get('exact') === 'Spectral Sliver') return ok(card('sliver', { name: 'Spectral Sliver', oracle_id: 'sliver-oracle' }));
+    return failure(404);
+  } });
+  assert.equal((await a.call('identifyByName', 'spectral Shiver')).name, 'Spectral Shift', 'network trouble: fall back to fuzzy');
+  acDown = false;
+  assert.equal((await a.call('identifyByName', 'spectral Shiver')).name, 'Spectral Sliver', 'not cached, so the next read re-checks');
+  assert.equal((await a.call('identifyByName', 'Spectral Slivor')).name, 'Spectral Sliver');
+  assert.equal(acCalls, 2, 'the second glare read reuses the cached "spectral" name list');
 });
 
 test('shopping list counts only main and commander, groups printings, and prices the missing copies', () => {

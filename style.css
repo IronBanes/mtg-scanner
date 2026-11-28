@@ -72,20 +72,23 @@ textarea { min-height: 160px; font-family: ui-monospace, Menlo, monospace; font-
 
 /* camera */
 .camera {
-  position: relative; width: 100%; aspect-ratio: 3 / 4; max-height: 62vh;
+  position: relative; width: 100%; aspect-ratio: 3 / 4; max-height: 74vh; /* the camera gets most of the screen */
   background: #000; border-radius: 16px; overflow: hidden; margin-bottom: 12px;
 }
 .camera video { width: 100%; height: 100%; object-fit: cover; display: block; }
 .guide {
   position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-  height: 86%; aspect-ratio: 63 / 88; max-width: 90%;
-  border: 2px solid rgba(255,255,255,.85); border-radius: 4.5% / 3.2%;
+  height: 92%; aspect-ratio: 63 / 88; max-width: 94%;
+  border: 3px solid rgba(255,255,255,.9); border-radius: 4.5% / 3.2%; transition: border-color .15s, box-shadow .15s;
   box-shadow: 0 0 0 2000px rgba(0,0,0,.35);
   pointer-events: none;
 }
 .guide .name-zone { position: absolute; left: 5%; right: 20%; top: 2.5%; height: 9.5%; border: 1.5px dashed var(--accent); border-radius: 4px; }
 .guide .set-zone { position: absolute; left: 3%; width: 47%; bottom: 2.5%; height: 8.5%; border: 1.5px dashed rgba(255,255,255,.5); border-radius: 4px; }
 .camera.found .guide { border-color: var(--good); }
+/* live feedback: amber = a card is being read (hold still), red = the name can't be read (glare: tilt the card) */
+.camera.seeing .guide { border-color: var(--accent); }
+.camera.glare .guide { border-color: var(--bad); }
 .cam-msg {
   position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 8px; text-align: center; padding: 24px; background: rgba(0,0,0,.55);
