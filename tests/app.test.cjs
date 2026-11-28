@@ -409,6 +409,48 @@ test('review: findCardEdges rejects a card box that runs off the image', () => {
   assert.equal(a.call('findCardEdges', {}, { x: 200, y: 200, w: 600, h: 838 }, 820, 1400), null);
 });
 
+test('printMatches finds a printing by set name, code, number or year, all words required', () => {
+  const a = app();
+  const ons = { set_name: 'Onslaught', set: 'ons', collector_number: '347', released_at: '2002-10-07' };
+  for (const q of ['onslaught', 'ONS', 'ons 347', '#347', '2002', 'slaught']) assert.ok(a.call('printMatches', ons, q), q);
+  for (const q of ['ons 348', 'mirage', '2003']) assert.ok(!a.call('printMatches', ons, q), q);
+});
+
+test('the card popup loads every page of printings and the filter narrows the list', async () => {
+  const forest = (id, set, setName, cn, year) => card(id, { name: 'Forest', oracle_id: 'forest-oracle', set, set_name: setName,
+    collector_number: cn, released_at: `${year}-01-01`, prints_search_uri: 'https://api.scryfall.com/cards/search?q=forest&page=1' });
+  const pages = {
+    1: { data: [forest('f1', 'dmu', 'Dominaria United', '277', 2022), forest('f2', 'm21', 'Core Set 2021', '274', 2020)], has_more: true, next_page: 'https://api.scryfall.com/cards/search?q=forest&page=2' },
+    2: { data: [forest('ons-f', 'ons', 'Onslaught', '347', 2002), forest('f4', '7ed', 'Seventh Edition', '347', 2001)], has_more: false },
+  };
+  const a = app({ route: (url) => {
+    if (url.pathname === '/cards/f1') return ok(forest('f1', 'dmu', 'Dominaria United', '277', 2022));
+    if (url.pathname === '/cards/search') return ok(pages[url.searchParams.get('page')]);
+    return failure(404);
+  } });
+  await a.call('openCard', 'f1');
+  const sel = () => a.element('#printSel').innerHTML;
+  assert.equal((sel().match(/<option value="[^"]+"/g) || []).length, 4, 'both pages loaded (no 350 cap)');
+  assert.match(a.element('#printCount').textContent, /4 printings/);
+  // "ons": only the Onslaught Forest; the shown printing (f1) isn't in the results, so the list asks to pick one
+  a.element('#printFilter').value = 'ons';
+  a.element('#printFilter').oninput();
+  assert.match(sel(), /<option value="" selected disabled>Pick a printing \(1 found\)/);
+  assert.match(sel(), /value="ons-f"[^>]*>Onslaught \(ONS\) #347 · 2002/);
+  assert.ok(!sel().includes('value="f2"'));
+  assert.equal(a.element('#printCount').textContent, '1 of 4');
+  // "347" matches both #347 printings; "zzz" matches none
+  a.element('#printFilter').value = '347'; a.element('#printFilter').oninput();
+  assert.match(sel(), /Pick a printing \(2 found\)/);
+  a.element('#printFilter').value = 'zzz'; a.element('#printFilter').oninput();
+  assert.match(sel(), /No printing matches/);
+  // Add with the "pick one" row selected does nothing but say so
+  a.element('#printSel').value = '';
+  a.element('#addBtn').onclick();
+  assert.match(a.element('#toast').innerHTML, /Pick a printing/);
+  assert.equal(a.state().collection.length, 0);
+});
+
 test('looksLikeName keeps card names and drops texture noise', () => {
   const a = app();
   for (const t of ['Sol Ring', 'Opt', 'Wrath of God', 'Swords to Plowshares', 'spectral Shiver fs', 'Circle of Protection Black']) assert.ok(a.call('looksLikeName', t), t);

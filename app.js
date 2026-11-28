@@ -1024,7 +1024,9 @@ async function openCard(cardId, { afterAdd, defaultDest } = {}) {
       <div class="stat"><b>${owned}</b><span>You own</span></div>
     </div>
     ${tradeHtml(c)}
-    <label class="field"><span>Printing</span><select id="printSel"><option value="${esc(c.id)}">${esc(c.set_name)} (${esc(c.set.toUpperCase())}) #${esc(c.cn)}</option></select></label>
+    <label class="field"><span>Printing <small class="muted" id="printCount"></small></span>
+      <input type="search" id="printFilter" placeholder="Find: set name, code, number or year" autocomplete="off" enterkeyhint="search">
+      <select id="printSel"><option value="${esc(c.id)}">${esc(c.set_name)} (${esc(c.set.toUpperCase())}) #${esc(c.cn)}</option></select></label>
     <div class="form-grid">
       <label class="field full"><span>Add to</span><select id="addDest">${destOptions(dest0, { includeNone: false })}</select></label>
       <label class="field"><span>Quantity</span><input type="number" id="addQty" value="1" min="1" inputmode="numeric"></label>
@@ -1039,6 +1041,7 @@ async function openCard(cardId, { afterAdd, defaultDest } = {}) {
   syncBoard();
   destSel.onchange = () => handleNewDeckOption(destSel, (id) => { destSel.innerHTML = destOptions(id || 'collection', { includeNone: false }); syncBoard(); });
   $('#addBtn').onclick = () => {
+    if (!$('#printSel').value) return toast('Pick a printing from the list first');
     const id = $('#printSel').value, qty = Math.max(1, parseInt($('#addQty').value) || 1);
     const foil = $('#addFoil').checked, dest = destSel.value;
     addTo(dest, id, foil, qty, boardSel.value);
@@ -1054,25 +1057,45 @@ async function openCard(cardId, { afterAdd, defaultDest } = {}) {
     renderAll();
   }));
   $('#printSel').onchange = () => { const id = $('#printSel').value; openCard(id, { afterAdd, defaultDest: destSel.value }); };
-  // load printings
+  // load printings: every page (basic lands have over a thousand), redrawing the list as pages arrive
   if (c.prints_uri) {
+    const prints = [];
+    const draw = () => { const sel = $('#printSel'); if (sel && my === modalSeq) renderPrintings(prints, c.id); };
+    $('#printFilter').oninput = draw;
     try {
-      let url = c.prints_uri, prints = [];
-      while (url && prints.length < 350) {
+      let url = c.prints_uri;
+      while (url && prints.length < 3000) {
         const r = await sf(url); if (my !== modalSeq) return;
-        prints.push(...r.data); url = r.has_more ? r.next_page : null;
+        // hide digital-only versions, but always keep the one currently shown
+        prints.push(...r.data.filter((p) => !p.digital || p.id === c.id)); url = r.has_more ? r.next_page : null;
+        r.data.forEach((p) => (state.cards[p.id] ? Object.assign(state.cards[p.id], slim(p)) : (state.cards[p.id] = slim(p))));
+        draw();
       }
-      const sel = $('#printSel'); if (!sel || my !== modalSeq) return;
-      prints.forEach((p) => (state.cards[p.id] ? Object.assign(state.cards[p.id], slim(p)) : (state.cards[p.id] = slim(p))));
       save();
-      // hide digital-only versions, but always keep the one currently shown
-      sel.innerHTML = prints.filter((p) => !p.digital || p.id === c.id).map((p) => {
-        const s = state.cards[p.id];
-        const pr = s.prices.usd ? money(s.prices.usd) : s.prices.usd_foil ? money(s.prices.usd_foil) + ' foil' : 'no price';
-        return `<option value="${esc(p.id)}" ${p.id === c.id ? 'selected' : ''}>${esc(s.set_name)} (${esc(s.set.toUpperCase())}) #${esc(s.cn)} — ${pr}</option>`;
-      }).join('');
     } catch {}
   }
+}
+/** Does a printing match every word of the filter? Words are matched against its set name, set code,
+    collector number and year ("onslaught", "ons", "347", "2002", "ons 347"). */
+function printMatches(p, q) {
+  const hay = `${p.set_name} ${p.set} #${p.collector_number} ${(p.released_at || '').slice(0, 4)}`.toLowerCase();
+  return String(q).toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.includes(w.replace(/^#/, '')));
+}
+/** Fill the printing list from the loaded printings, filtered by #printFilter. When the shown printing isn't
+    in the results, a "pick one" row is selected, so the popup never shows one printing and adds another. */
+function renderPrintings(prints, currentId) {
+  const sel = $('#printSel'), q = ($('#printFilter').value || '').trim();
+  const shown = q ? prints.filter((p) => printMatches(p, q)) : prints;
+  const opt = (p) => {
+    const s = state.cards[p.id];
+    const pr = s.prices.usd ? money(s.prices.usd) : s.prices.usd_foil ? money(s.prices.usd_foil) + ' foil' : 'no price';
+    const year = (p.released_at || '').slice(0, 4);
+    return `<option value="${esc(p.id)}" ${p.id === currentId ? 'selected' : ''}>${esc(s.set_name)} (${esc(s.set.toUpperCase())}) #${esc(s.cn)}${year ? ' · ' + esc(year) : ''} — ${pr}</option>`;
+  };
+  const pick = q && !shown.some((p) => p.id === currentId)
+    ? `<option value="" selected disabled>${shown.length ? `Pick a printing (${shown.length} found)` : 'No printing matches'}</option>` : '';
+  sel.innerHTML = pick + shown.map(opt).join('');
+  $('#printCount').textContent = q ? `${shown.length} of ${prints.length}` : `${prints.length} printing${prints.length === 1 ? '' : 's'}`;
 }
 
 // ---------------------------------------------------------------- collection
@@ -1578,4 +1601,4 @@ function init() {
 init();
 
 // exposed for testing in the console
-window.__mtg = { cropForOcr, findCardEdges, identifyNearGuide, grayOf, boxBlur, identifyFrom, cleanName, parseSetLine, parseList, toCsv, synergyTags, SYNERGY_RULES, state: () => state };
+window.__mtg = { cropForOcr, printMatches, findCardEdges, identifyNearGuide, grayOf, boxBlur, identifyFrom, cleanName, parseSetLine, parseList, toCsv, synergyTags, SYNERGY_RULES, state: () => state };
