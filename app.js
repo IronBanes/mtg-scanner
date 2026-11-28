@@ -73,10 +73,10 @@ let saveBlocked = null; // reason string when saving is paused to protect data w
 const defaultState = () => ({
   schema: SCHEMA,
   cards: {},          // scryfall id -> slim card data (cache)
-  collection: [],     // {cardId, foil, qty, added}
+  collection: [],     // {cardId, foil, qty, added, trade?} — trade: copies of this entry for trade (0..qty, key absent when 0)
   decks: [],          // {id, name, format, created, cards:[{cardId, foil, qty, board}]}
   recent: [],         // {cardId, foil, t}
-  settings: { dest: 'none', sound: true, exact: true, searchOwned: false },
+  settings: { dest: 'none', sound: true, exact: true, searchOwned: false, tradeOnly: false },
 });
 let state = defaultState();
 function keepSafetyCopy(tag, raw) {
@@ -637,7 +637,17 @@ function removeFrom(dest, cardId, foil, qty = 1, board = 'main') {
   if (!list) return;
   const i = list.findIndex((x) => x.cardId === cardId && !!x.foil === !!foil && (dest === 'collection' || x.board === board));
   if (i < 0) return;
-  list[i].qty -= qty; if (list[i].qty <= 0) list.splice(i, 1);
+  list[i].qty -= qty;
+  if (list[i].qty <= 0) list.splice(i, 1); // the last copy goes: the entry (and its trade count) goes with it
+  else if (dest === 'collection' && (list[i].trade || 0) > list[i].qty) list[i].trade = list[i].qty; // never trade more than you own
+  save();
+}
+/** How many of one owned entry's copies are marked for trade (the trade binder). Clamped to 0..qty; 0 drops the key. */
+function setTrade(cardId, foil, n) {
+  const e = state.collection.find((x) => x.cardId === cardId && !!x.foil === !!foil);
+  if (!e) return;
+  const t = Math.max(0, Math.min(Math.round(Number(n) || 0), e.qty));
+  if (t > 0) e.trade = t; else delete e.trade;
   save();
 }
 
@@ -791,6 +801,16 @@ function renderSearchResults() {
   if (!shown.length && searchCards.length) res.innerHTML = '<p class="empty">None of these results are in your collection.</p>';
 }
 
+/** The "For trade" block in a card popup: one row per owned finish of this exact printing. Empty when you own none. */
+function tradeHtml(c) {
+  const rows = [false, true].map((foil) => state.collection.find((x) => x.cardId === c.id && !!x.foil === foil)).filter(Boolean);
+  if (!rows.length) return '';
+  return `<div class="trade-block"><h3>For trade</h3>${rows.map((e) => `<div class="trade-row">
+    <span>${e.foil ? 'Foil' : 'Normal'}</span><span class="muted">own ${e.qty}</span>
+    <div class="qty"><button data-trade="-1" data-foil="${e.foil ? 1 : 0}">−</button><b>${e.trade || 0}</b><button data-trade="1" data-foil="${e.foil ? 1 : 0}">+</button></div>
+  </div>`).join('')}</div>`;
+}
+
 // ---------------------------------------------------------------- card detail
 async function openCard(cardId, { afterAdd, defaultDest } = {}) {
   const my = ++modalSeq; // a newer openCard or closing the popup makes this load stale
@@ -815,6 +835,7 @@ async function openCard(cardId, { afterAdd, defaultDest } = {}) {
       <div class="stat hl"><b>${c.prices.usd_foil || c.prices.usd_etched ? money(c.prices.usd_foil || c.prices.usd_etched) : '—'}</b><span>Foil</span></div>
       <div class="stat"><b>${owned}</b><span>You own</span></div>
     </div>
+    ${tradeHtml(c)}
     <label class="field"><span>Printing</span><select id="printSel"><option value="${esc(c.id)}">${esc(c.set_name)} (${esc(c.set.toUpperCase())}) #${esc(c.cn)}</option></select></label>
     <div class="form-grid">
       <label class="field full"><span>Add to</span><select id="addDest">${destOptions(dest0, { includeNone: false })}</select></label>
@@ -836,6 +857,14 @@ async function openCard(cardId, { afterAdd, defaultDest } = {}) {
     hideModal(); toast(`Added ${qty}× ${state.cards[id].name} to ${destLabel(dest)}`);
     renderAll(); afterAdd && afterAdd();
   };
+  // For-trade steppers: setTrade, then update the number in place (the popup stays open) and re-render behind it
+  $$('[data-trade]').forEach((b) => (b.onclick = () => {
+    const foil = b.dataset.foil === '1', e = state.collection.find((x) => x.cardId === c.id && !!x.foil === foil);
+    if (!e) return;
+    setTrade(c.id, foil, (e.trade || 0) + Number(b.dataset.trade));
+    b.parentElement.querySelector('b').textContent = e.trade || 0;
+    renderAll();
+  }));
   $('#printSel').onchange = () => { const id = $('#printSel').value; openCard(id, { afterAdd, defaultDest: destSel.value }); };
   // load printings
   if (c.prints_uri) {
@@ -865,6 +894,32 @@ function collectionTotals() {
   state.collection.forEach((e) => { const c = state.cards[e.cardId]; if (!c) return; cards += e.qty; value += unitPrice(c, e.foil) * e.qty; change += priceChange(c, e.foil) * e.qty; unique.add(c.oracle_id); });
   return { cards, value, change, unique: unique.size };
 }
+/** Totals over the copies marked for trade: value, count and unique card identities. */
+function tradeTotals() {
+  let cards = 0, value = 0, change = 0;
+  const unique = new Set();
+  state.collection.forEach((e) => {
+    const c = state.cards[e.cardId]; if (!c || !e.trade) return;
+    cards += e.trade; value += unitPrice(c, e.foil) * e.trade; change += priceChange(c, e.foil) * e.trade; unique.add(c.oracle_id);
+  });
+  return { cards, value, change, unique: unique.size };
+}
+/** The trade binder's stat tiles: same shape as the collection's, over trade copies. */
+function tradeStats(t) {
+  return `<div class="stat hl"><b>${money(t.value)}</b><span>Trade value</span>${changeStat(t.change)}</div>
+    <div class="stat"><b>${t.cards}</b><span>For trade</span></div><div class="stat"><b>${t.unique}</b><span>Unique</span></div>`;
+}
+/** Entries with copies marked for trade, sorted by name (one line each in the shareable list). */
+function tradeEntries() {
+  return state.collection.filter((e) => e.trade > 0 && state.cards[e.cardId])
+    .sort((a, b) => state.cards[a.cardId].name.localeCompare(state.cards[b.cardId].name));
+}
+/** Shareable trade list: "2 Sol Ring (C21) 263 *F*" per line (Moxfield/Archidekt import format), then a total. */
+function tradeText() {
+  const line = (e) => `${e.trade} ${state.cards[e.cardId].name} (${state.cards[e.cardId].set.toUpperCase()}) ${state.cards[e.cardId].cn}${e.foil ? ' *F*' : ''}`;
+  const sum = tradeEntries().reduce((s, e) => s + unitPrice(state.cards[e.cardId], e.foil) * e.trade, 0);
+  return [...tradeEntries().map(line), '', `Total: ${money(sum)}`].join('\n');
+}
 function collectionStats(t) {
   return `<div class="stat hl"><b>${money(t.value)}</b><span>Total value</span>${changeStat(t.change)}</div>
     <div class="stat"><b>${t.cards}</b><span>Cards</span></div><div class="stat"><b>${t.unique}</b><span>Unique</span></div>`;
@@ -877,10 +932,11 @@ function changeStat(change) {
   return `<span class="chg ${dir}">${sym} ${money(Math.abs(change))}</span>`;
 }
 function renderCollection() {
-  const t = collectionTotals();
-  $('#collStats').innerHTML = collectionStats(t);
+  const tradeOnly = !!state.settings.tradeOnly;
+  $('#collStats').innerHTML = tradeOnly ? tradeStats(tradeTotals()) : collectionStats(collectionTotals());
+  for (const id of ['#tradeCopy', '#tradeCsv']) $(id).classList.toggle('hidden', !tradeOnly); // trade sharing, only in trade view
   const f = norm($('#collFilter').value), sort = $('#collSort').value;
-  let list = state.collection.filter((e) => state.cards[e.cardId] && (!f || norm(state.cards[e.cardId].name + state.cards[e.cardId].type).includes(f)));
+  let list = state.collection.filter((e) => state.cards[e.cardId] && (!tradeOnly || e.trade > 0) && (!f || norm(state.cards[e.cardId].name + state.cards[e.cardId].type).includes(f)));
   const C = (e) => state.cards[e.cardId];
   if (sort === 'name') list.sort((a, b) => C(a).name.localeCompare(C(b).name));
   else if (sort === 'price') list.sort((a, b) => unitPrice(C(b), b.foil) * b.qty - unitPrice(C(a), a.foil) * a.qty);
@@ -890,8 +946,12 @@ function renderCollection() {
   }
   else if (sort === 'set') list.sort((a, b) => C(a).set_name.localeCompare(C(b).set_name) || C(a).cn.localeCompare(C(b).cn, undefined, { numeric: true }));
   else list.sort((a, b) => (b.added || 0) - (a.added || 0));
-  $('#collList').innerHTML = list.length ? list.map((e) => cardRow(e, { qtyControls: true }).replace('<li ', `<li data-foil="${e.foil ? 1 : 0}" `)).join('')
-    : `<li class="empty">${state.collection.length ? 'Nothing matches.' : 'Your collection is empty. Scan cards with “Collection” selected, or add them from Search.'}</li>`;
+  $('#collList').innerHTML = list.length ? list.map((e) => cardRow(e, {
+    qtyControls: true,
+    sub: e.trade > 0 ? ` · <span class="trade">⇄ ${e.trade} for trade</span>` : '',
+  }).replace('<li ', `<li data-foil="${e.foil ? 1 : 0}" `)).join('')
+    : `<li class="empty">${tradeOnly ? 'Nothing marked for trade yet. Open a card you own and set how many to trade.'
+      : state.collection.length ? 'Nothing matches.' : 'Your collection is empty. Scan cards with “Collection” selected, or add them from Search.'}</li>`;
 }
 // ---------------------------------------------------------------- decks
 let openDeckId = null;
@@ -1215,6 +1275,7 @@ function setView(v) {
 }
 function renderAll() { renderDestSelect(); renderRecent(); renderCollection(); renderDecks();
   $('#searchOwned').checked = !!state.settings.searchOwned; // stays in sync after a backup restore
+  $('#tradeOnly').checked = !!state.settings.tradeOnly;
   if (searchCards.length) renderSearchResults();
 }
 
@@ -1280,6 +1341,8 @@ function init() {
 
   $('#searchOwned').checked = !!state.settings.searchOwned;
   $('#searchOwned').onchange = (e) => { state.settings.searchOwned = e.target.checked; save(); renderSearchResults(); };
+  $('#tradeOnly').checked = !!state.settings.tradeOnly;
+  $('#tradeOnly').onchange = (e) => { state.settings.tradeOnly = e.target.checked; save(); renderCollection(); };
   attachAutocomplete($('#searchInput'), $('#suggestList'), (name) => runSearch(`!"${name}"`));
   $('#searchForm').onsubmit = (e) => { e.preventDefault(); const q = $('#searchInput').value.trim(); if (q) runSearch(q); };
   $('#moreBtn').onclick = () => searchNext && runSearch('', true);
@@ -1289,6 +1352,8 @@ function init() {
   $('#collRefreshBtn').onclick = () => doRefresh(state.collection.map((e) => e.cardId));
   $('#collCsvBtn').onclick = () => downloadCsv('mtg-collection', state.collection);
   $('#collImportBtn').onclick = () => importDialog('collection');
+  $('#tradeCopy').onclick = () => copyText(tradeText(), 'Trade list copied');
+  $('#tradeCsv').onclick = () => downloadCsv('mtg-trade-binder', tradeEntries().map((e) => ({ cardId: e.cardId, foil: e.foil, qty: e.trade })));
   $('#newDeckBtn').onclick = () => { const n = prompt('Deck name?'); if (n && n.trim()) { const d = createDeck(n.trim()); openDeckId = d.id; renderDecks(); } };
 
   document.addEventListener('visibilitychange', () => { if (document.hidden) stopCamera(); });

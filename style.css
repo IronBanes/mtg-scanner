@@ -198,6 +198,13 @@ li.shop-total .meta .n, li.shop-total .meta .s { text-align: left; }
 .oracle { white-space: pre-wrap; background: var(--panel); border-radius: 10px; padding: 10px; font-size: 14px; }
 .prices { display: flex; gap: 8px; margin: 8px 0; }
 .prices .stat { flex: 1; }
+#tradeOnly { margin-bottom: 10px; } /* a lone toggle under the filter/sort row, spacing like the .row.gap rows */
+.trade-block { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin: 0 0 12px; }
+.trade-block h3 { margin: 0 0 8px; font-size: 14px; }
+.trade-row { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+.trade-row + .trade-row { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }
+.trade-row .qty { margin-left: auto; } /* the stepper sits at the right; .qty buttons are 40px tap targets already */
+.trade { color: var(--accent); }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0; }
 .form-grid .full { grid-column: 1 / -1; }
 
