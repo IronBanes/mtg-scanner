@@ -375,7 +375,7 @@ function statsHtml(d) {
 
     <div class="panel"><h3>Lands & colors</h3>
       <p><b>${a.lands}</b> lands of ${a.total} cards. ${landNote}</p>
-      ${colorRows ? `<table class="colors"><thead><tr><th>Color</th><th>Symbols in costs</th><th>Lands that make it</th></tr></thead><tbody>${colorRows}</tbody></table>` : '<p class="muted">No colored mana symbols yet.</p>'}
+      ${colorRows ? `<table class="colors"><thead><tr><th>Color</th><th>Symbols in costs</th><th>Cards that make it</th></tr></thead><tbody>${colorRows}</tbody></table>` : '<p class="muted">No colored mana symbols yet.</p>'}
     </div>
 
     <div class="panel"><h3>Card types</h3><div class="chips">${types || '<span class="muted">No cards yet.</span>'}</div></div>

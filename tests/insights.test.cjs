@@ -481,6 +481,7 @@ test('the Stats tab renders legality, curve, lands and legendaries for a command
   const d = deck(a, 'Boros', 'commander', [['boros', 1, 'commander'], ['bolt', 1], ['Mountain', 98]]);
   const html = open(a, d, 'stats');
   assert.match(html, /<span class="badge-ok">Legal<\/span>/);
+  assert.match(html, /<th>Cards that make it<\/th>/, 'rocks and mana creatures count too, not just lands');
   assert.match(html, /<b>98<\/b> lands of 100 cards\. <span class="warn">High/);
   assert.match(html, /<b>boros<\/b>/);
   assert.match(html, /Commander<\/span><\/li>/);
