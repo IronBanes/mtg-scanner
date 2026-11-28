@@ -16,7 +16,8 @@ const card = (id = 'sol-ring', overrides = {}) => ({
   type_line: 'Artifact', prices: { usd: '2.50', usd_foil: '5.00' }, ...overrides,
 });
 
-function app({ raw, route, ocr = [], confirm = () => true, offlineStorage = false, mediaDevices, insights = false, all = {} } = {}) {
+// `pixels(w, h)` lets a test supply the RGBA data a canvas's getImageData returns (default: all zeros)
+function app({ raw, route, ocr = [], confirm = () => true, offlineStorage = false, mediaDevices, insights = false, all = {}, pixels } = {}) {
   const stored = new Map(raw === undefined ? [] : [[storageKey, raw]]);
   const requests = [], timers = new Map(), elements = new Map();
   let nextTimer = 0, tick = 0, reloads = 0;
@@ -60,7 +61,7 @@ function app({ raw, route, ocr = [], confirm = () => true, offlineStorage = fals
         return {
           getContext: () => ({
             drawImage() {}, putImageData() {},
-            getImageData: (_, __, w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }),
+            getImageData: (_, __, w, h) => ({ data: pixels ? pixels(w, h) : new Uint8ClampedArray(w * h * 4) }),
           }),
         };
       },

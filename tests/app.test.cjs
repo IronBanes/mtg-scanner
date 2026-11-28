@@ -232,6 +232,20 @@ test('OCR cleans names and reads both modern and fraction collector numbers', ()
     assert.ok(result.sets.includes(set));
   }
   assert.equal(a.call('parseSetLine', 'unreadable').num, undefined);
+  // review: an old card's artist/copyright line has no language marker, so it yields no set codes to look up
+  for (const line of ['Illus. Christopher Rush\n© 1993-1995 Wizards of the Coast', 'ILLUS. MARK POOLE 123/350 ©1999 WIZARDS']) {
+    assert.deepEqual(json(a.call('parseSetLine', line).sets), [], line);
+  }
+});
+
+test('review: exact mode makes no printing lookups for an old card without a set code', async () => {
+  const a = app({
+    ocr: ['Lightning Bolt', 'Illus. Christopher Rush\n© 1993-1995 Wizards of the Coast'],
+    route: (url) => (url.pathname === '/cards/named' ? ok(card('bolt', { name: 'Lightning Bolt', oracle_id: 'bolt-oracle' })) : failure(404)),
+  });
+  const result = await a.call('identifyFrom', {}, { x: 0, y: 0, w: 200, h: 280 }, { exact: true });
+  assert.equal(result.card.id, 'bolt');
+  assert.deepEqual(a.requests.map(({ url }) => url.pathname), ['/cards/named'], 'no /cards/<set>/<num> guesses');
 });
 
 test('exact OCR skips a wrong oracle identity and accepts a matching printing', async () => {
@@ -272,6 +286,47 @@ test('grayOf: the darkest channel keeps near-white text bright and makes a color
   assert.ok(min(text) - min(greenFrame) > lum(text) - lum(greenFrame), 'more contrast between text and a colored frame');
   assert.equal(min(greenFrame), 90);
   assert.equal(lum([255, 255, 255]), 255);
+});
+
+test('review: the old-frame gray crop turns light text on a colored frame into dark text on light', () => {
+  // a 10x10 crop: green frame everywhere, one row of near-white "text" at y = 5
+  let last;
+  const a = app({ pixels: (w, h) => {
+    const d = new Uint8ClampedArray(w * h * 4);
+    for (let p = 0; p < w * h; p++) d.set(Math.floor(p / w) === 5 ? [240, 236, 228, 255] : [110, 140, 90, 255], p * 4);
+    return (last = d);
+  } });
+  const gray = (opts, invert) => { a.call('grayCrop', {}, { x: 0, y: 0, w: 100, h: 100 }, { x: 0, y: 0, w: 1, h: 1 }, 10, invert, opts); return [last[5 * 40], last[0]]; };
+  assert.deepEqual(gray({ channel: 'min', smooth: 0 }, true), [0, 255], 'text dark, frame light');
+  // a mild blur leaves that order intact
+  const [text, frame] = gray({ channel: 'min', smooth: 1 }, true);
+  assert.ok(text < frame, `text ${text} stays darker than frame ${frame}`);
+});
+
+test('review: thresholdCanvas wipes blobs touching the edges, except in plain mode', () => {
+  const a = app();
+  // 10x6 gray image: a dark bar at x 0..2 touching top and bottom, a dark "letter" at x 5..6, y 2..3, light elsewhere
+  const run = (mode) => json(a.eval(`(() => {
+    const W = 10, H = 6, d = new Uint8ClampedArray(W * H * 4);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const v = x <= 2 || (x >= 5 && x <= 6 && y >= 2 && y <= 3) ? 20 : 220; d.set([v, v, v, 255], (y * W + x) * 4); }
+    d.set([24, 24, 24, 255], 0); // one slightly lighter dark pixel (in the bar), as a real image has: the Otsu cut lands above 20
+
+    thresholdCanvas({ width: W, height: H, getContext: () => ({ getImageData: () => ({ data: d }), putImageData() {} }) }, ${JSON.stringify(mode)});
+    return { bar: d[(3 * W + 1) * 4], letter: d[(2 * W + 5) * 4], bg: d[(0 * W + 8) * 4] };
+  })()`));
+  assert.deepEqual(run(true), { bar: 255, letter: 0, bg: 255 }, 'the edge bar is wiped, the letter kept');
+  assert.deepEqual(run('plain'), { bar: 0, letter: 0, bg: 255 }, 'plain keeps everything dark');
+});
+
+test('review: oldFrame:false skips the two old-frame crops; thresholded variants reuse their gray crop', async () => {
+  let crops = 0;
+  const a = app({ ocr: ['', '', '', '', 'Lightning Bolt'], pixels: (w, h) => (crops++, new Uint8ClampedArray(w * h * 4)) });
+  const result = await a.call('identifyFrom', {}, { x: 0, y: 0, w: 200, h: 280 }, { exact: false, oldFrame: false });
+  assert.equal(result.card, null, 'only the four modern crops ran');
+  assert.equal(a.eval('NAME_VARIANTS').length, 6);
+  // 4 modern variants: 3 distinct gray crops (variants 1 and 2 share a zone) + 3 thresholded copies read back = 6 reads,
+  // instead of 7 when every variant redid its own crop
+  assert.equal(crops, 6);
 });
 
 test('boxBlur averages a gray channel in place and leaves radius 0 alone', () => {

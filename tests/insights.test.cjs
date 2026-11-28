@@ -97,6 +97,16 @@ test('in Commander, mana sources only count for the commander’s colors', () =>
   assert.deepEqual(sources('commander', [['tower', 1], ['sol', 1]]), SRC(1, 1, 1, 1, 1, 1));
 });
 
+test('review: rituals make mana once, so instants and sorceries are not counted as sources', () => {
+  const a = setup([
+    sfCard('ritual', { type_line: 'Instant', cmc: 1, produced_mana: ['B'] }), // Dark Ritual
+    sfCard('rite', { type_line: 'Sorcery', cmc: 1, produced_mana: ['R'] }), // Rite of Flame
+    sfCard('elf', { type_line: 'Creature — Elf Druid', cmc: 1, produced_mana: ['G'] }), // Llanowar Elves
+  ]);
+  const s = analyze(a, deck(a, 'R', 'modern', [['ritual', 4], ['rite', 4], ['elf', 4]])).sources;
+  assert.deepEqual([s.B, s.R, s.G], [0, 0, 4]);
+});
+
 test('analyzeDeck: ties for highest mana value list every card once', () => {
   const a = setup([sfCard('x', { cmc: 5 }), sfCard('y', { cmc: 5 }), sfCard('z', { cmc: 2 })]);
   const d = deck(a, 'Ties', 'modern', [['x', 1], ['z', 1], ['y', 1], ['x', 1, 'main', true]]);
