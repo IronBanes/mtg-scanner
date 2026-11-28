@@ -73,6 +73,30 @@ test('analyzeDeck: curve, averages, highest, color symbols vs sources, types, ke
   assert.deepEqual(casual.issues, [], 'formats without rules report no legality issues');
 });
 
+test('in Commander, mana sources only count for the commander’s colors', () => {
+  const a = setup([
+    sfCard('tower', { type_line: 'Land', produced_mana: ['W', 'U', 'B', 'R', 'G'] }), // Command Tower
+    sfCard('sol', { type_line: 'Artifact', cmc: 1, produced_mana: ['C'] }), // Sol Ring
+    legend('krenko', ['R']),
+    legend('p1', ['R'], { keywords: ['Partner'] }),
+    legend('p2', ['G'], { keywords: ['Partner'] }),
+    legend('karn', [], { type_line: 'Legendary Artifact Creature — Golem', cmc: 4 }),
+  ]);
+  const SRC = (W, U, B, R, G, C) => ({ W, U, B, R, G, C });
+  const sources = (format, entries) => analyze(a, deck(a, 'D', format, entries)).sources;
+
+  // mono-red: Command Tower is one red source, and nothing else
+  assert.deepEqual(sources('commander', [['krenko', 1, 'commander'], ['tower', 1]]), SRC(0, 0, 0, 1, 0, 0));
+  // partner pair (R + G): the tower covers exactly their two colors
+  assert.deepEqual(sources('commander', [['p1', 1, 'commander'], ['p2', 1, 'commander'], ['tower', 1]]), SRC(0, 0, 0, 1, 1, 0));
+  // a colorless commander: the tower makes nothing it can use, but colorless mana still counts
+  assert.deepEqual(sources('commander', [['karn', 1, 'commander'], ['tower', 1], ['sol', 1]]), SRC(0, 0, 0, 0, 0, 1));
+  // other formats are untouched: every color the card says it makes counts
+  assert.deepEqual(sources('modern', [['tower', 1], ['sol', 1]]), SRC(1, 1, 1, 1, 1, 1));
+  // and so is a Commander deck before any commander is chosen
+  assert.deepEqual(sources('commander', [['tower', 1], ['sol', 1]]), SRC(1, 1, 1, 1, 1, 1));
+});
+
 test('analyzeDeck: ties for highest mana value list every card once', () => {
   const a = setup([sfCard('x', { cmc: 5 }), sfCard('y', { cmc: 5 }), sfCard('z', { cmc: 2 })]);
   const d = deck(a, 'Ties', 'modern', [['x', 1], ['z', 1], ['y', 1], ['x', 1, 'main', true]]);

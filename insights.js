@@ -160,13 +160,19 @@ function analyzeDeck(entries, cards, format) {
   const types = {}, pips = { W: 0, U: 0, B: 0, R: 0, G: 0 }, sources = { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 };
   let lands = 0;
   const keywords = {};
+  // commander colour identity (union of the commanders' identities), needed before sources are counted
+  const identity = new Set(commanders.flatMap((r) => r.card.colors || []));
+  // In Commander a mana source only ever makes the commander's colors ("one mana of any color" means
+  // one of those), so a produced color outside the identity is not a source of it. Everywhere else
+  // (other formats, or a Commander deck with no commander chosen yet) every color still counts.
+  const sourceOk = format === 'commander' && commanders.length ? (m) => m === 'C' || identity.has(m) : () => true;
   for (const r of played) {
     const c = r.card, t = primaryType(c.type);
     types[t] = (types[t] || 0) + r.qty;
     for (const k of c.keywords || []) (keywords[k] = keywords[k] || []).push(c.name);
+    for (const m of c.produced || []) if (m in sources && sourceOk(m)) sources[m] += r.qty;
     if (t === 'Land') {
       lands += r.qty;
-      for (const m of c.produced || []) if (m in sources) sources[m] += r.qty;
       continue;
     }
     const mv = Number(c.cmc) || 0;
@@ -177,9 +183,6 @@ function analyzeDeck(entries, cards, format) {
     const p = pipsOf(c.mana);
     for (const col of COLORS) pips[col] += p[col] * r.qty;
   }
-
-  // commander colour identity (union of the commanders' identities)
-  const identity = new Set(commanders.flatMap((r) => r.card.colors || []));
 
   // legality
   const fmt = LIMITS[format] ? format : null;
