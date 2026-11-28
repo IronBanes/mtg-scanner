@@ -2,7 +2,7 @@
 // on every deploy: the browser sees sw.js changed, installs the new set with cache.addAll (all files
 // or nothing), then waits; it takes over only after the user taps Reload or every old tab is closed. Pages are always served from one complete release,
 // so a failed download can never mix old and new files.
-const VERSION = '10';
+const VERSION = '11';
 const CACHE = 'mtgscan-r' + VERSION;
 const COMPLETE = '/__release-complete__';
 const SHELL = ['./', 'index.html', `style.css?v=${VERSION}`, `app.js?v=${VERSION}`, `insights.js?v=${VERSION}`, 'manifest.webmanifest',

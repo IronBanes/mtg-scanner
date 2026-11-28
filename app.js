@@ -76,7 +76,7 @@ const defaultState = () => ({
   collection: [],     // {cardId, foil, qty, added, trade?} — trade: copies of this entry for trade (0..qty, key absent when 0)
   decks: [],          // {id, name, format, created, cards:[{cardId, foil, qty, board}]}
   recent: [],         // {cardId, foil, t}
-  settings: { dest: 'none', sound: true, exact: true, searchOwned: false, tradeOnly: false },
+  settings: { dest: 'none', sound: true, exact: true, searchOwned: false, tradeOnly: false, oldCards: false },
 });
 let state = defaultState();
 function keepSafetyCopy(tag, raw) {
@@ -353,6 +353,19 @@ async function identifyByName(text) {
     const words = text.split(' ');
     if (words.length > 2) card = (await tryFuzzy(words.slice(1).join(' '))) || (await tryFuzzy(words.slice(0, -1).join(' ')));
   }
+  // Fuzzy search isn't spelling distance: glare turned "Spectral Sliver" into "spectral Shiver", and fuzzy said
+  // Spectral Shift. When the match isn't near-exact, list the names that start with the read's first long word
+  // and take the closest spelling if it's clearly closer (one extra request, only for imperfect matches).
+  const fit = (name) => Math.max(levRatio(text, frontName(name)), levRatio(text, name));
+  const first = text.split(' ').find((w) => w.replace(/[^A-Za-z]/g, '').length >= 4);
+  if (card && first && fit(card.name) < 0.95) {
+    try {
+      const ac = await sf('/cards/autocomplete?q=' + encodeURIComponent(first));
+      let best = null, bestFit = fit(card.name) + 0.05;
+      for (const n of ac.data || []) if (fit(n) > bestFit) { best = n; bestFit = fit(n); }
+      if (best) card = await sf('/cards/named?exact=' + encodeURIComponent(best));
+    } catch {} // keep the fuzzy match if the re-check fails
+  }
   const minRatio = key.length < 6 ? 0.8 : 0.6; // short reads must match closely
   if (card && levRatio(text, frontName(card.name)) < minRatio && levRatio(text, card.name) < minRatio) card = null;
   if (card || !netError) lookupCache.set(key, card);
@@ -508,6 +521,20 @@ function parseSetLine(text) {
   return { num, sets };
 }
 
+/** Does an OCR read look like a card name rather than texture noise? Names are a few mostly-long words;
+    noise is many 1–2 letter scraps ("me SE BRO oer iy YE ZR gag"). Skipping noise saves Scryfall round trips,
+    which were most of the time spent on a failed frame. */
+function looksLikeName(text) {
+  const words = String(text).split(' ').filter(Boolean);
+  const letters = (w) => w.replace(/[^A-Za-z]/g, '').length;
+  const all = words.reduce((s, w) => s + letters(w), 0), long = words.reduce((s, w) => s + (letters(w) >= 3 ? letters(w) : 0), 0);
+  return all >= 3 && words.length <= 7 && long / all >= 0.6;
+}
+
+// The crop that read the last card: tried first next time, since cards in one session (and the second,
+// confirming frame of auto-scan) usually look alike. Saves the other attempts on most frames.
+let lastNameVariant = 0;
+
 /**
  * Run the full identify pipeline on an image source with the card at `card` (pixel rect).
  * Returns {card (scryfall object), text} or {card:null, text}.
@@ -517,8 +544,10 @@ async function identifyFrom(src, rect, { exact = state.settings.exact, oldFrame 
   let card = null, text = '', firstText = '';
   // gray crops by zone + settings: a thresholded variant reuses its gray twin instead of redoing crop and blur
   const grays = new Map();
+  const order = [lastNameVariant, ...NAME_VARIANTS.keys()].filter((i, k, all) => all.indexOf(i) === k && NAME_VARIANTS[i]);
   // a few crop/cleanup variants; stop at the first one that matches a real card
-  for (const v of NAME_VARIANTS) {
+  for (const vi of order) {
+    const v = NAME_VARIANTS[vi];
     if (v.channel === 'min' && !oldFrame) continue; // old-frame crops: skipped when the caller wants a quick pass
     await w.setParameters({ tessedit_pageseg_mode: '6', tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',- " });
     const key = JSON.stringify([v.zone, v.invert ?? null, v.channel || 'lum', v.smooth || 0]);
@@ -530,8 +559,9 @@ async function identifyFrom(src, rect, { exact = state.settings.exact, oldFrame 
     // old-frame crops read texture as short junk on an empty table: only look up longer reads from them
     if (text.replace(/[^A-Za-z]/g, '').length < (v.channel === 'min' ? 6 : 3)) continue;
     firstText = firstText || text;
+    if (!looksLikeName(text)) continue; // noise: no Scryfall lookup
     card = await identifyByName(text);
-    if (card) break;
+    if (card) { lastNameVariant = vi; break; }
   }
   if (!card) return { card: null, text: firstText };
   if (exact) {
@@ -554,7 +584,7 @@ async function identifyFrom(src, rect, { exact = state.settings.exact, oldFrame 
 }
 
 // ---------------------------------------------------------------- camera
-const cam = { stream: null, running: false, auto: false, busy: false, lastSeen: null, lastAdded: null, gap: true, wake: null, oldTurn: false, misses: 0 };
+const cam = { stream: null, running: false, auto: false, busy: false, lastSeen: null, lastAdded: null, gap: true, wake: null, misses: 0 };
 
 function guideRectInVideo() {
   const v = $('#video'), box = $('#camera').getBoundingClientRect(), gr = $('#guide').getBoundingClientRect();
@@ -624,11 +654,9 @@ async function loopAuto() {
     if (!rect || cam.busy) { await sleep(300); continue; }
     cam.busy = true;
     try {
-      // Old-frame crops add two OCR passes to every miss, so with nothing in view they run on every other
-      // frame only. While a card is being seen, or was just added and the frame hasn't emptied, they run every
-      // frame: an old card can then be confirmed twice, and a skipped frame can't fake an empty table.
-      const oldFrame = cam.lastSeen !== null || !cam.gap || (cam.oldTurn = !cam.oldTurn);
-      const { card, text } = await identifyFrom($('#video'), rect, { exact: state.settings.exact, oldFrame });
+      // Old-frame crops add two OCR passes to every miss, so auto-scan only uses them when "Scanning old cards"
+      // is on in Settings. The shutter and Photo buttons always try them.
+      const { card, text } = await identifyFrom($('#video'), rect, { exact: state.settings.exact, oldFrame: !!state.settings.oldCards });
       if (!cam.auto) break;
       if (!card) {
         // one unreadable frame (a flicker, or a flaky old-frame read) is not an empty table: only two misses in a
@@ -636,7 +664,9 @@ async function loopAuto() {
         cam.misses = (cam.misses || 0) + 1;
         if (cam.misses >= 2) cam.gap = true;
         cam.lastSeen = null; $('#camera').classList.remove('found');
-        status(text ? `Reading… "${text}"` : 'Waiting for a card…');
+        // text but no match, several frames running: usually glare across the name (foils, sleeves)
+        status(text && cam.misses >= 3 ? 'Can’t read the name — tilt the card a little to move the glare off it'
+          : text ? `Reading… "${text}"` : 'Waiting for a card…');
       } else {
         cam.misses = 0;
         // need the same card twice in a row; re-add the same name only after the frame changed
@@ -1275,6 +1305,8 @@ function openSettings() {
   const bytes = (localStorage.getItem(STORE_KEY) || '').length;
   showModal(`<h2>Settings & backup</h2>
     <label class="toggle"><input type="checkbox" id="setSound" ${state.settings.sound ? 'checked' : ''}> Beep when a card is recognized</label>
+    <label class="toggle"><input type="checkbox" id="setOldCards" ${state.settings.oldCards ? 'checked' : ''}> Scanning old cards (1993–2003)</label>
+    <p class="muted">Auto-scan then also tries the old-card name reading on every frame. It's slower, so leave it off for newer cards. The shutter and Photo buttons always try it.</p>
     <p class="muted">“Exact printing” on the Scan tab also reads the set code / collector number at the bottom of newer cards (2015+) so the right version and price are picked. Turn it off for faster scanning.</p>
     <h3>Backup</h3>
     <p class="muted">Your data lives only on this phone (${(bytes / 1024).toFixed(0)} KB). Export a backup now and then — it's one file you can save to iCloud Drive / Files.</p>
@@ -1292,6 +1324,7 @@ function openSettings() {
     a.download = 'mtg-scanner-' + b.dataset.safety.slice(BACKUP_PREFIX.length) + '.json'; a.click();
   }));
   $('#setSound').onchange = (e) => { state.settings.sound = e.target.checked; save(); };
+  $('#setOldCards').onchange = (e) => { state.settings.oldCards = e.target.checked; save(); };
   $('#bkExport').onclick = async () => {
     const file = new File([JSON.stringify({ app: 'mtgscan', v: 1, at: new Date().toISOString(), ...persistable() })], `mtg-scanner-backup-${new Date().toISOString().slice(0, 10)}.json`, { type: 'application/json' });
     if (navigator.canShare && navigator.canShare({ files: [file] })) { try { await navigator.share({ files: [file] }); return; } catch (e) { if (e.name === 'AbortError') return; } }
