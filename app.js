@@ -589,6 +589,64 @@ async function identifyFrom(src, rect, { exact = state.settings.exact, oldFrame 
   return { card, text };
 }
 
+/** Edge strength profiles of a gray W×H image: col[x] sums |left-right| change over the middle rows (vertical
+    edges), row[y] sums |up-down| change over the middle columns (horizontal edges). Pure, for testing. */
+function edgeProfiles(L, W, H) {
+  const col = new Float32Array(W), row = new Float32Array(H);
+  for (let y = Math.round(H * 0.2); y < H * 0.8; y++) for (let x = 1; x < W - 1; x++) col[x] += Math.abs(L[y * W + x + 1] - L[y * W + x - 1]);
+  for (let x = Math.round(W * 0.2); x < W * 0.8; x++) for (let y = 1; y < H - 1; y++) row[y] += Math.abs(L[(y + 1) * W + x] - L[(y - 1) * W + x]);
+  return { col, row };
+}
+/** The strongest pair of edges in a profile whose distance is `size` (±6%): {a, b, s} or null. */
+function edgePair(arr, size) {
+  let max = 0, sum = 0; for (const v of arr) { max = Math.max(max, v); sum += v; }
+  if (!(max > 2.5 * (sum / arr.length))) return null; // nothing stands out (flat or evenly busy): no card edges
+  const peaks = []; for (let i = 1; i < arr.length - 1; i++) if (arr[i] >= arr[i - 1] && arr[i] >= arr[i + 1] && arr[i] >= max * 0.3) peaks.push(i);
+  let best = null;
+  for (const a of peaks) for (const b of peaks) if (b > a && Math.abs((b - a) / size - 1) < 0.06 && (!best || arr[a] + arr[b] > best.s)) best = { a, b, s: arr[a] + arr[b] };
+  return best;
+}
+/**
+ * Find the card's real edges near the guide (a card that isn't lined up exactly): straight edges a card's
+ * height apart (70–125% of the guide), then a pair a card's width apart. Returns a source-pixel rect, or null
+ * when nothing card-shaped stands out (an empty table, a white card on a white desk).
+ */
+function findCardEdges(src, guide, srcW, srcH) {
+  const ar = 63 / 88, pad = 0.15;
+  const x0 = Math.max(0, guide.x - guide.w * pad), y0 = Math.max(0, guide.y - guide.h * pad);
+  const rw = Math.min(srcW, guide.x + guide.w * (1 + pad)) - x0, rh = Math.min(srcH, guide.y + guide.h * (1 + pad)) - y0;
+  if (!(rw > 0 && rh > 0)) return null;
+  const W = 200, H = Math.max(2, Math.round((W * rh) / rw)), k = rw / W;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(src, x0, y0, rw, rh, 0, 0, W, H);
+  const d = g.getImageData(0, 0, W, H).data, L = new Float32Array(W * H);
+  for (let p = 0; p < W * H; p++) L[p] = grayOf(d[p * 4], d[p * 4 + 1], d[p * 4 + 2]);
+  const { col, row } = edgeProfiles(L, W, H);
+  let tb = null;
+  for (let f = 0.7; f <= 1.25; f += 0.02) { const p = edgePair(row, (guide.h * f) / k); if (p && (!tb || p.s > tb.s)) tb = p; }
+  if (!tb) return null;
+  const hN = tb.b - tb.a, lr = edgePair(col, hN * ar);
+  // no clear left/right pair (a sleeve stack, a busy mat): keep the guide's middle, sized to the card's height
+  const xL = lr ? lr.a : (guide.x + guide.w / 2 - x0) / k - (hN * ar) / 2, wN = lr ? lr.b - lr.a : hN * ar;
+  return { x: x0 + xL * k, y: y0 + tb.a * k, w: wN * k, h: hN * k };
+}
+/**
+ * Read the card in `guide`, and if that fails, look for the card's real edges and read again there, but only
+ * when they're noticeably off the guide. Lining the card up costs nothing extra; a card that's a bit off, too
+ * small or too big in the guide gets a second chance. Returns identifyFrom's result plus the rect that worked.
+ */
+async function identifyNearGuide(src, guide, srcW, srcH, opts) {
+  const first = await identifyFrom(src, guide, opts);
+  if (first.card) return { ...first, rect: guide };
+  const found = findCardEdges(src, guide, srcW, srcH);
+  const off = found && (Math.abs(found.y - guide.y) > guide.h * 0.03 || Math.abs(found.h - guide.h) > guide.h * 0.05
+    || Math.abs(found.x - guide.x) > guide.w * 0.04);
+  if (!off) return { ...first, rect: guide };
+  const again = await identifyFrom(src, found, opts);
+  return again.card ? { ...again, rect: found } : { ...first, rect: guide };
+}
+
 // ---------------------------------------------------------------- camera
 const cam = { stream: null, running: false, auto: false, busy: false, lastSeen: null, lastAdded: null, gap: true, wake: null, misses: 0 };
 
@@ -608,6 +666,7 @@ async function startCamera() {
       audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 } },
     });
     const v = $('#video'); v.srcObject = cam.stream; await v.play();
+    $('#camera').scrollIntoView?.({ block: 'start', behavior: 'smooth' }); // the camera gets the screen
     try { const [track] = cam.stream.getVideoTracks(); const caps = track.getCapabilities?.() || {};
       if (caps.focusMode?.includes('continuous')) await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch {}
     $('#camMsg').classList.add('hidden');
@@ -634,7 +693,7 @@ async function scanOnce() {
   const rect = guideRectInVideo(); if (!rect) return;
   cam.busy = true; $('#shutterBtn').disabled = true; status('Reading card…');
   try {
-    const { card, text } = await identifyFrom($('#video'), rect);
+    const v = $('#video'), { card, text } = await identifyNearGuide(v, rect, v.videoWidth, v.videoHeight);
     if (card) { beep(); showResult(cache(card), text); status(''); }
     else { status(text ? `Couldn't match "${text}" — try again, or tap Type` : 'No card name found — fill the frame & hold steady'); beep(300); }
   } catch (e) { status('Error: ' + e.message); }
@@ -649,8 +708,14 @@ async function startAuto() {
   status('Auto-scan on — show cards one at a time');
   loopAuto();
 }
+/** Color the guide outline: 'seeing' (a card is read, hold still), 'found' (added), 'glare' (can't read the name), or none. */
+function outline(mode) {
+  const c = $('#camera').classList;
+  for (const m of ['seeing', 'found', 'glare']) c.remove(m);
+  if (mode) c.add(mode);
+}
 function stopAuto() {
-  cam.auto = false; $('#camera').classList.remove('found');
+  cam.auto = false; outline(null);
   $('#autoBtn').textContent = 'Start auto-scan'; $('#autoBtn').classList.add('primary');
   try { cam.wake && cam.wake.release(); } catch {} cam.wake = null;
 }
@@ -662,16 +727,18 @@ async function loopAuto() {
     try {
       // Old-frame crops add two OCR passes to every miss, so auto-scan only uses them when "Scanning old cards"
       // is on in Settings. The shutter and Photo buttons always try them.
-      const { card, text } = await identifyFrom($('#video'), rect, { exact: state.settings.exact, oldFrame: !!state.settings.oldCards });
+      const v = $('#video'), { card, text } = await identifyNearGuide(v, rect, v.videoWidth, v.videoHeight, { exact: state.settings.exact, oldFrame: !!state.settings.oldCards });
       if (!cam.auto) break;
       if (!card) {
         // one unreadable frame (a flicker, or a flaky old-frame read) is not an empty table: only two misses in a
         // row count as a gap, so a card that stays in view isn't added again
         cam.misses = (cam.misses || 0) + 1;
         if (cam.misses >= 2) cam.gap = true;
-        cam.lastSeen = null; $('#camera').classList.remove('found');
+        cam.lastSeen = null;
         // text but no match, several frames running: usually glare across the name (foils, sleeves)
-        status(text && cam.misses >= 3 ? 'Can’t read the name — tilt the card a little to move the glare off it'
+        const glare = !!text && cam.misses >= 3;
+        outline(glare ? 'glare' : null);
+        status(glare ? 'Can’t read the name — tilt the card a little to move the glare off it'
           : text ? `Reading… "${text}"` : 'Waiting for a card…');
       } else {
         cam.misses = 0;
@@ -679,10 +746,10 @@ async function loopAuto() {
         if (cam.lastSeen === card.id && (cam.gap || cam.lastAdded !== card.oracle_id)) {
           const s = cache(card); addScanned(s, { quiet: true }); beep();
           cam.lastAdded = card.oracle_id; cam.gap = false;
-          $('#camera').classList.add('found'); status(`✓ ${s.name} — ${money(unitPrice(s, foilOn()))}. Next card!`);
-          setTimeout(() => $('#camera').classList.remove('found'), 600);
+          outline('found'); status(`✓ ${s.name} — ${money(unitPrice(s, foilOn()))}. Next card!`);
+          setTimeout(() => $('#camera').classList.contains('found') && outline(null), 600);
         } else if (cam.lastAdded !== card.oracle_id || cam.gap) {
-          status(`Seeing ${card.name}…`);
+          outline('seeing'); status(`Seeing ${card.name}… hold still`);
         }
         cam.lastSeen = card.id;
       }
@@ -701,7 +768,7 @@ async function scanPhoto(file) {
   const rect = { x: (W - w) / 2, y: (H - h) / 2, w, h };
   status('Reading photo…');
   try {
-    const { card, text } = await identifyFrom(img, rect);
+    const { card, text } = await identifyNearGuide(img, rect, W, H); // finds a card that doesn't fill the photo
     if (card) { beep(); showResult(cache(card), text); status(''); }
     else status(text ? `Couldn't match "${text}" — crop the photo to the card, or tap Type` : 'No card name found in photo');
   } catch (e) { status('Error: ' + e.message); }
@@ -1502,4 +1569,4 @@ function init() {
 init();
 
 // exposed for testing in the console
-window.__mtg = { cropForOcr, grayOf, boxBlur, identifyFrom, cleanName, parseSetLine, parseList, toCsv, synergyTags, SYNERGY_RULES, state: () => state };
+window.__mtg = { cropForOcr, findCardEdges, identifyNearGuide, grayOf, boxBlur, identifyFrom, cleanName, parseSetLine, parseList, toCsv, synergyTags, SYNERGY_RULES, state: () => state };

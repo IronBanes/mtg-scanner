@@ -351,6 +351,38 @@ test('boxBlur averages a gray channel in place and leaves radius 0 alone', () =>
   assert.deepEqual(same, strip);
 });
 
+test('findCardEdges finds a card that sits off the guide, and nothing on a flat image', () => {
+  // source 1000x1400, guide at (200,200) 600x838; the real card is 50 px right and 100 px lower
+  // findCardEdges samples the guide plus 15% into a 200-px-wide canvas: x0 = 110, y0 ≈ 74.3, scale ≈ 3.9
+  const guide = { x: 200, y: 200, w: 600, h: 838 };
+  const a = app({ pixels: (w, h) => {
+    const d = new Uint8ClampedArray(w * h * 4), k = 780 / w;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const sx = 110 + x * k, sy = 74.3 + y * k, inCard = sx >= 250 && sx < 850 && sy >= 300 && sy < 1138;
+      const v = inCard ? 40 : 220; d.set([v, v, v, 255], (y * w + x) * 4);
+    }
+    return d;
+  } });
+  const r = json(a.call('findCardEdges', {}, guide, 1000, 1400));
+  for (const [key, want] of Object.entries({ x: 250, y: 300, w: 600, h: 838 })) {
+    assert.ok(Math.abs(r[key] - want) < 12, `${key} ${Math.round(r[key])} ≈ ${want}`);
+  }
+  assert.equal(app().call('findCardEdges', {}, guide, 1000, 1400), null, 'flat image: no card edges');
+});
+
+test('identifyNearGuide reads the guide first and only retries at detected edges when they are off', async () => {
+  // flat pixels: no edges, so a failed guide read is final (no second set of OCR reads)
+  const a = app({ ocr: ['', '', '', '', '', ''], route: () => ok(card()) });
+  const r = await a.call('identifyNearGuide', {}, { x: 0, y: 0, w: 200, h: 280 }, 200, 280, { exact: false });
+  assert.equal(r.card, null);
+  // a read in the guide returns at once with the guide rect
+  const b = app({ ocr: ['Sol Ring'], route: () => ok(card()) });
+  const g = { x: 0, y: 0, w: 200, h: 280 };
+  const hit = await b.call('identifyNearGuide', {}, g, 200, 280, { exact: false });
+  assert.equal(hit.card.name, 'Sol Ring');
+  assert.deepEqual(json(hit.rect), g);
+});
+
 test('looksLikeName keeps card names and drops texture noise', () => {
   const a = app();
   for (const t of ['Sol Ring', 'Opt', 'Wrath of God', 'Swords to Plowshares', 'spectral Shiver fs', 'Circle of Protection Black']) assert.ok(a.call('looksLikeName', t), t);
@@ -484,6 +516,23 @@ test('auto-scan uses the old-frame crops only with "Scanning old cards" on, and 
   // review (Sonnet): an empty table that OCRs as noise is not glare; keep "Waiting for a card…"
   const empty = await run(false, Array(12).fill('me SE BRO oer iy YE ZR gag'), 3);
   assert.equal(empty.status, 'Waiting for a card…');
+});
+
+test('the guide outline shows amber while reading, red for glare, and clears on an empty frame', async () => {
+  const a = app({ mediaDevices: { getUserMedia: async () => ({ getVideoTracks: () => [] }) },
+    ocr: ['Sol Ring', ...Array(12).fill('Spectral Shiver'), '', '', '', ''],
+    route: (url) => (url.searchParams.get('fuzzy') === 'Sol Ring' ? ok(card()) : failure(404)) });
+  Object.assign(a.state().settings, { exact: false, sound: false });
+  Object.assign(a.element('#video'), { videoWidth: 200, videoHeight: 280, play: async () => {} });
+  for (const s of ['#camera', '#guide']) a.element(s).getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 280 });
+  const cls = () => ['seeing', 'found', 'glare'].filter((c) => a.element('#camera').classList.contains(c)).join() || 'none';
+  const seen = [];
+  await a.element('#autoBtn').onclick();
+  try {
+    for (let f = 0; f < 5; f++) { if (f) a.advance(150); await new Promise((r) => setImmediate(r)); seen.push(cls()); }
+  } finally { a.element('#autoBtn').onclick(); a.flush(); }
+  // frame 1: Sol Ring read once (amber), frames 2-4: unreadable text (red from the 3rd), frame 5: empty
+  assert.deepEqual(seen, ['seeing', 'none', 'none', 'glare', 'none']);
 });
 
 test('review: a failed re-rank returns the fuzzy match without caching it; the name list is cached per word', async () => {
