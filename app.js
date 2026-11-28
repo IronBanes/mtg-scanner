@@ -1000,7 +1000,7 @@ function tradeHtml(c) {
 }
 
 // ---------------------------------------------------------------- card detail
-async function openCard(cardId, { afterAdd, defaultDest } = {}) {
+async function openCard(cardId, { afterAdd, defaultDest, printFilter } = {}) {
   const my = ++modalSeq; // a newer openCard or closing the popup makes this load stale
   let c = state.cards[cardId];
   showModal(`<p class="muted">Loading…</p>`);
@@ -1024,7 +1024,9 @@ async function openCard(cardId, { afterAdd, defaultDest } = {}) {
       <div class="stat"><b>${owned}</b><span>You own</span></div>
     </div>
     ${tradeHtml(c)}
-    <label class="field"><span>Printing</span><select id="printSel"><option value="${esc(c.id)}">${esc(c.set_name)} (${esc(c.set.toUpperCase())}) #${esc(c.cn)}</option></select></label>
+    <label class="field"><span>Printing <small class="muted" id="printCount"></small></span>
+      <input type="search" id="printFilter" placeholder="Find: set name, code, number or year" autocomplete="off" enterkeyhint="search">
+      <select id="printSel"><option value="${esc(c.id)}">${esc(c.set_name)} (${esc(c.set.toUpperCase())}) #${esc(c.cn)}</option></select></label>
     <div class="form-grid">
       <label class="field full"><span>Add to</span><select id="addDest">${destOptions(dest0, { includeNone: false })}</select></label>
       <label class="field"><span>Quantity</span><input type="number" id="addQty" value="1" min="1" inputmode="numeric"></label>
@@ -1039,6 +1041,7 @@ async function openCard(cardId, { afterAdd, defaultDest } = {}) {
   syncBoard();
   destSel.onchange = () => handleNewDeckOption(destSel, (id) => { destSel.innerHTML = destOptions(id || 'collection', { includeNone: false }); syncBoard(); });
   $('#addBtn').onclick = () => {
+    if (!$('#printSel').value) return toast('Pick a printing from the list first');
     const id = $('#printSel').value, qty = Math.max(1, parseInt($('#addQty').value) || 1);
     const foil = $('#addFoil').checked, dest = destSel.value;
     addTo(dest, id, foil, qty, boardSel.value);
@@ -1053,26 +1056,67 @@ async function openCard(cardId, { afterAdd, defaultDest } = {}) {
     b.parentElement.querySelector('b').textContent = e.trade || 0;
     renderAll();
   }));
-  $('#printSel').onchange = () => { const id = $('#printSel').value; openCard(id, { afterAdd, defaultDest: destSel.value }); };
-  // load printings
+  // picking a printing reopens the popup on it; the filter text carries over so you can compare the next one
+  $('#printSel').onchange = () => { const id = $('#printSel').value; if (id) openCard(id, { afterAdd, defaultDest: destSel.value, printFilter: $('#printFilter').value }); };
+  // load printings: every page (basic lands have over a thousand), redrawing the list as pages arrive.
+  // A complete list is kept for the session per card, so picking another printing doesn't load it all again.
   if (c.prints_uri) {
+    const key = c.oracle_id || c.id, cached = printsCache.get(key);
+    const entry = cached || { list: [], done: false, failed: false };
+    let timer;
+    const draw = () => { if (my === modalSeq && $('#printSel') && $('#printFilter')) renderPrintings(entry, c.id); };
+    if (printFilter) $('#printFilter').value = printFilter;
+    $('#printFilter').oninput = () => { clearTimeout(timer); timer = setTimeout(draw, 120); }; // not every keystroke
+    draw();
+    if (cached) return;
     try {
-      let url = c.prints_uri, prints = [];
-      while (url && prints.length < 350) {
-        const r = await sf(url); if (my !== modalSeq) return;
-        prints.push(...r.data); url = r.has_more ? r.next_page : null;
+      let url = c.prints_uri;
+      while (url && entry.list.length < 3000) {
+        const r = await sf(url); if (my !== modalSeq) return; // popup closed or replaced: stop loading
+        // hide digital-only versions, but always keep the one currently shown
+        entry.list.push(...r.data.filter((p) => !p.digital || p.id === c.id)); url = r.has_more ? r.next_page : null;
+        // cache new printings only: overwriting a cached card here would skip price-change tracking (cache())
+        r.data.forEach((p) => { if (!state.cards[p.id]) state.cards[p.id] = slim(p); });
+        draw();
       }
-      const sel = $('#printSel'); if (!sel || my !== modalSeq) return;
-      prints.forEach((p) => (state.cards[p.id] ? Object.assign(state.cards[p.id], slim(p)) : (state.cards[p.id] = slim(p))));
+      entry.done = true; printsCache.set(key, entry);
       save();
-      // hide digital-only versions, but always keep the one currently shown
-      sel.innerHTML = prints.filter((p) => !p.digital || p.id === c.id).map((p) => {
-        const s = state.cards[p.id];
-        const pr = s.prices.usd ? money(s.prices.usd) : s.prices.usd_foil ? money(s.prices.usd_foil) + ' foil' : 'no price';
-        return `<option value="${esc(p.id)}" ${p.id === c.id ? 'selected' : ''}>${esc(s.set_name)} (${esc(s.set.toUpperCase())}) #${esc(s.cn)} — ${pr}</option>`;
-      }).join('');
-    } catch {}
+    } catch { entry.failed = true; }
+    draw();
   }
+}
+const printsCache = new Map(); // oracle_id -> { list, done } of a card's printings, complete lists only, per session
+/** Does a printing match every word of the filter? Words are matched against its set name and set code;
+    a number must be the collector number or the year exactly ("onslaught", "ons 347", "#347", "2002"). */
+function printMatches(p, q) {
+  const text = `${p.set_name} ${p.set}`.toLowerCase(), cn = String(p.collector_number || '').toLowerCase().replace(/^0+/, '');
+  const year = (p.released_at || '').slice(0, 4);
+  return String(q).toLowerCase().split(/\s+/).map((w) => w.replace(/^#/, '')).filter(Boolean)
+    .every((w) => (/^\d+$/.test(w) ? w.replace(/^0+/, '') === cn || w === year : text.includes(w)));
+}
+/** Fill the printing list from the loaded printings, filtered by #printFilter. The printing shown in the popup
+    stays selected until you pick another: while pages load it's kept at the top even if not loaded yet, and
+    when a filter hides it a "pick one" row is selected, so the popup never shows one printing and adds another. */
+function renderPrintings(entry, currentId) {
+  const sel = $('#printSel'), q = ($('#printFilter').value || '').trim();
+  if (typeof document !== 'undefined' && document.activeElement === sel) return; // the list is open: don't yank it
+  const list = entry.list, shown = q ? list.filter((p) => printMatches(p, q)) : list;
+  const opt = (p) => {
+    const s = state.cards[p.id]; if (!s) return '';
+    const pr = s.prices.usd ? money(s.prices.usd) : s.prices.usd_foil ? money(s.prices.usd_foil) + ' foil' : 'no price';
+    const year = (p.released_at || '').slice(0, 4);
+    return `<option value="${esc(p.id)}" ${p.id === currentId ? 'selected' : ''}>${esc(s.set_name)} (${esc(s.set.toUpperCase())}) #${esc(s.cn)}${year ? ' · ' + esc(year) : ''} — ${pr}</option>`;
+  };
+  const loading = !entry.done && !entry.failed;
+  let head = '';
+  if (q && !shown.some((p) => p.id === currentId)) {
+    head = `<option value="" selected disabled>${shown.length ? `Pick a printing (${shown.length} found)` : loading ? 'No match yet — still loading' : 'No printing matches'}</option>`;
+  } else if (!q && !list.some((p) => p.id === currentId)) {
+    head = opt({ id: currentId }); // the shown printing isn't on a loaded page yet: keep it selected
+  }
+  sel.innerHTML = head + shown.map(opt).join('');
+  const n = list.length, tail = loading ? ' — loading…' : entry.failed ? ' — couldn’t load them all' : '';
+  const count = $('#printCount'); if (count) count.textContent = (q ? `${shown.length} of ${n}` : `${n} printing${n === 1 ? '' : 's'}`) + tail;
 }
 
 // ---------------------------------------------------------------- collection
@@ -1578,4 +1622,4 @@ function init() {
 init();
 
 // exposed for testing in the console
-window.__mtg = { cropForOcr, findCardEdges, identifyNearGuide, grayOf, boxBlur, identifyFrom, cleanName, parseSetLine, parseList, toCsv, synergyTags, SYNERGY_RULES, state: () => state };
+window.__mtg = { cropForOcr, printMatches, findCardEdges, identifyNearGuide, grayOf, boxBlur, identifyFrom, cleanName, parseSetLine, parseList, toCsv, synergyTags, SYNERGY_RULES, state: () => state };

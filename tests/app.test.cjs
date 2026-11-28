@@ -409,6 +409,80 @@ test('review: findCardEdges rejects a card box that runs off the image', () => {
   assert.equal(a.call('findCardEdges', {}, { x: 200, y: 200, w: 600, h: 838 }, 820, 1400), null);
 });
 
+test('printMatches finds a printing by set name, code, number or year, all words required', () => {
+  const a = app();
+  const ons = { set_name: 'Onslaught', set: 'ons', collector_number: '347', released_at: '2002-10-07' };
+  for (const q of ['onslaught', 'ONS', 'ons 347', '#347', '2002', 'slaught', '0347']) assert.ok(a.call('printMatches', ons, q), q);
+  // review (Sonnet): numbers match the collector number or year exactly, so '7' or '34' don't match everything
+  for (const q of ['ons 348', 'mirage', '2003', '7', '34']) assert.ok(!a.call('printMatches', ons, q), q);
+});
+
+test('the card popup loads every page of printings and the filter narrows the list', async () => {
+  const forest = (id, set, setName, cn, year) => card(id, { name: 'Forest', oracle_id: 'forest-oracle', set, set_name: setName,
+    collector_number: cn, released_at: `${year}-01-01`, prints_search_uri: 'https://api.scryfall.com/cards/search?q=forest&page=1' });
+  const pages = {
+    1: { data: [forest('f1', 'dmu', 'Dominaria United', '277', 2022), forest('f2', 'm21', 'Core Set 2021', '274', 2020)], has_more: true, next_page: 'https://api.scryfall.com/cards/search?q=forest&page=2' },
+    2: { data: [forest('ons-f', 'ons', 'Onslaught', '347', 2002), forest('f4', '7ed', 'Seventh Edition', '347', 2001)], has_more: false },
+  };
+  const a = app({ route: (url) => {
+    if (url.pathname === '/cards/f1') return ok(forest('f1', 'dmu', 'Dominaria United', '277', 2022));
+    if (url.pathname === '/cards/search') return ok(pages[url.searchParams.get('page')]);
+    return failure(404);
+  } });
+  await a.call('openCard', 'f1');
+  const sel = () => a.element('#printSel').innerHTML;
+  assert.equal((sel().match(/<option value="[^"]+"/g) || []).length, 4, 'both pages loaded (no 350 cap)');
+  assert.match(a.element('#printCount').textContent, /4 printings/);
+  // "ons": only the Onslaught Forest; the shown printing (f1) isn't in the results, so the list asks to pick one
+  a.element('#printFilter').value = 'ons';
+  a.element('#printFilter').oninput(); a.advance(120);
+  assert.match(sel(), /<option value="" selected disabled>Pick a printing \(1 found\)/);
+  assert.match(sel(), /value="ons-f"[^>]*>Onslaught \(ONS\) #347 · 2002/);
+  assert.ok(!sel().includes('value="f2"'));
+  assert.equal(a.element('#printCount').textContent, '1 of 4');
+  // "347" matches both #347 printings; "zzz" matches none
+  a.element('#printFilter').value = '347'; a.element('#printFilter').oninput(); a.advance(120);
+  assert.match(sel(), /Pick a printing \(2 found\)/);
+  a.element('#printFilter').value = 'zzz'; a.element('#printFilter').oninput(); a.advance(120);
+  assert.match(sel(), /No printing matches/);
+  // Add with the "pick one" row selected does nothing but say so
+  a.element('#printSel').value = '';
+  a.element('#addBtn').onclick();
+  assert.match(a.element('#toast').innerHTML, /Pick a printing/);
+  assert.equal(a.state().collection.length, 0);
+});
+
+test('review: the shown printing stays selected while later pages load; the list is cached; a failed load says so', async () => {
+  const forest = (id, set, setName, cn, year) => card(id, { name: 'Forest', oracle_id: 'forest-oracle', set, set_name: setName,
+    collector_number: cn, released_at: `${year}-01-01`, prints_search_uri: 'https://api.scryfall.com/cards/search?q=forest&page=1' });
+  const ons = forest('ons-f', 'ons', 'Onslaught', '347', 2002);
+  let page2 = 'ok', searches = 0;
+  const a = app({ route: (url) => {
+    if (url.pathname === '/cards/ons-f') return ok(ons);
+    if (url.pathname === '/cards/f1') return ok(forest('f1', 'dmu', 'Dominaria United', '277', 2022));
+    if (url.pathname === '/cards/search') {
+      searches++;
+      if (url.searchParams.get('page') === '1') return ok({ data: [forest('f1', 'dmu', 'Dominaria United', '277', 2022)], has_more: true, next_page: 'https://api.scryfall.com/cards/search?q=forest&page=2' });
+      return page2 === 'ok' ? ok({ data: [ons], has_more: false }) : failure(503);
+    }
+    return failure(404);
+  } });
+  // a failed second page: the list says so, and the shown printing (Onslaught, on page 2) is still selected
+  page2 = 'fail';
+  await a.call('openCard', 'ons-f');
+  const sel = () => a.element('#printSel').innerHTML;
+  assert.match(sel(), /^<option value="ons-f" selected>Onslaught/, 'shown printing kept at the top, selected');
+  assert.match(a.element('#printCount').textContent, /couldn’t load them all/);
+  // a complete load is cached: reopening (picking another printing) makes no new search requests
+  page2 = 'ok';
+  await a.call('openCard', 'ons-f');
+  const before = searches;
+  await a.call('openCard', 'f1', { printFilter: 'ons' });
+  assert.equal(searches, before, 'printings came from the session cache');
+  assert.equal(a.element('#printFilter').value, 'ons', 'the filter text carried over');
+  assert.match(sel(), /Pick a printing \(1 found\)/);
+});
+
 test('looksLikeName keeps card names and drops texture noise', () => {
   const a = app();
   for (const t of ['Sol Ring', 'Opt', 'Wrath of God', 'Swords to Plowshares', 'spectral Shiver fs', 'Circle of Protection Black']) assert.ok(a.call('looksLikeName', t), t);
