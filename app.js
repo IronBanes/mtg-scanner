@@ -375,8 +375,53 @@ function getWorker() {
   return ocrWorkerPromise;
 }
 
-/** Crop a region (fractions of the card rect) from a source into a cleaned-up canvas for OCR. */
-function cropForOcr(src, card, r, targetW = 900, binarize = false, forceInvert = null) {
+/** One gray value per pixel. 'lum' is normal brightness; 'min' is the darkest of R, G and B, which keeps
+    near-white text bright but makes a colored frame dark (old 1993–2003 frames print the name straight onto
+    a mottled colored border, where brightness alone barely separates them). */
+function grayOf(r, g, b, channel = 'lum') {
+  return channel === 'min' ? Math.min(r, g, b) : (r * 0.299 + g * 0.587 + b * 0.114) | 0;
+}
+/** Box blur of a W×H gray array in place (every 4th value of an RGBA array), radius `rad`. Smooths photo
+    grain and frame texture so it doesn't break letters apart before OCR. */
+function boxBlur(d, W, H, rad, step = 4) {
+  if (!(rad > 0)) return;
+  const tmp = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) {
+    let acc = 0, cnt = 0;
+    for (let x = -rad; x < W + rad; x++) {
+      if (x + rad < W) { acc += d[(y * W + x + rad) * step]; cnt++; }
+      if (x - rad - 1 >= 0) { acc -= d[(y * W + x - rad - 1) * step]; cnt--; }
+      if (x >= 0 && x < W) tmp[y * W + x] = acc / cnt;
+    }
+  }
+  for (let x = 0; x < W; x++) {
+    let acc = 0, cnt = 0;
+    for (let y = -rad; y < H + rad; y++) {
+      if (y + rad < H) { acc += tmp[(y + rad) * W + x]; cnt++; }
+      if (y - rad - 1 >= 0) { acc -= tmp[(y - rad - 1) * W + x]; cnt--; }
+      if (y >= 0 && y < H) d[(y * W + x) * step] = Math.round(acc / cnt);
+    }
+  }
+}
+
+/** Crop a region (fractions of the card rect) from a source into a cleaned-up canvas for OCR.
+    binarize: false (gray), true (Otsu, then wipe blobs touching the top/bottom edge), or 'plain' (Otsu only:
+    on a mottled old frame the texture connects the letters to the edges, so the wipe would erase them).
+    channel / smooth: see grayOf() and boxBlur(). */
+function cropForOcr(src, card, r, targetW = 900, binarize = false, forceInvert = null, { channel = 'lum', smooth = 0 } = {}) {
+  const c = grayCrop(src, card, r, targetW, forceInvert, { channel, smooth });
+  if (binarize) thresholdCanvas(c, binarize);
+  return c;
+}
+/** A copy of a canvas, so one gray crop can be thresholded without redoing the crop and blur. */
+function copyCanvas(c) {
+  const k = document.createElement('canvas');
+  k.width = c.width; k.height = c.height;
+  k.getContext('2d', { willReadFrequently: true }).drawImage(c, 0, 0);
+  return k;
+}
+/** The gray half of cropForOcr: crop, gray channel, optional smoothing, contrast stretch and polarity. */
+function grayCrop(src, card, r, targetW = 900, forceInvert = null, { channel = 'lum', smooth = 0 } = {}) {
   const sx = card.x + r.x * card.w, sy = card.y + r.y * card.h, sw = r.w * card.w, sh = r.h * card.h;
   const scale = targetW / sw;
   const c = document.createElement('canvas');
@@ -385,11 +430,10 @@ function cropForOcr(src, card, r, targetW = 900, binarize = false, forceInvert =
   g.imageSmoothingQuality = 'high';
   g.drawImage(src, sx, sy, sw, sh, 0, 0, c.width, c.height);
   const im = g.getImageData(0, 0, c.width, c.height), d = im.data;
+  for (let i = 0; i < d.length; i += 4) d[i] = grayOf(d[i], d[i + 1], d[i + 2], channel);
+  boxBlur(d, c.width, c.height, smooth);
   const hist = new Uint32Array(256); let sum = 0;
-  for (let i = 0; i < d.length; i += 4) {
-    const v = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) | 0;
-    d[i] = v; hist[v]++; sum += v;
-  }
+  for (let i = 0; i < d.length; i += 4) { const v = d[i]; hist[v]++; sum += v; }
   const n = d.length / 4, mean = sum / n;
   const pct = (p) => { let acc = 0; for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= n * p) return v; } return 255; };
   const lo = pct(0.02), hi = pct(0.98), span = Math.max(1, hi - lo);
@@ -399,16 +443,23 @@ function cropForOcr(src, card, r, targetW = 900, binarize = false, forceInvert =
     if (invert) v = 255 - v;
     d[i] = d[i + 1] = d[i + 2] = v;
   }
-  if (binarize) {
-    // Otsu threshold, then wipe frame lines / blobs that touch the top or bottom edge
-    const h2 = new Uint32Array(256); for (let i = 0; i < d.length; i += 4) h2[d[i] | 0]++;
-    let sumAll = 0; for (let v = 0; v < 256; v++) sumAll += v * h2[v];
-    let wB = 0, sB = 0, best = 0, thr = 128;
-    for (let v = 0; v < 256; v++) { wB += h2[v]; if (!wB) continue; const wF = n - wB; if (!wF) break; sB += v * h2[v];
-      const mB = sB / wB, mF = (sumAll - sB) / wF, between = wB * wF * (mB - mF) ** 2; if (between > best) { best = between; thr = v; } }
-    const W = c.width, H = c.height, dark = new Uint8Array(W * H);
-    for (let p = 0; p < W * H; p++) dark[p] = d[p * 4] < thr ? 1 : 0;
-    // flood-fill dark regions connected to the top/bottom edges (borders, crowns, frame lines)
+  g.putImageData(im, 0, 0);
+  return c;
+}
+/** The threshold half of cropForOcr, in place on a gray canvas: Otsu, then (unless 'plain') wipe blobs touching the edges. */
+function thresholdCanvas(c, binarize) {
+  const g = c.getContext('2d', { willReadFrequently: true });
+  const im = g.getImageData(0, 0, c.width, c.height), d = im.data, n = d.length / 4;
+  // Otsu threshold
+  const h2 = new Uint32Array(256); for (let i = 0; i < d.length; i += 4) h2[d[i] | 0]++;
+  let sumAll = 0; for (let v = 0; v < 256; v++) sumAll += v * h2[v];
+  let wB = 0, sB = 0, best = 0, thr = 128;
+  for (let v = 0; v < 256; v++) { wB += h2[v]; if (!wB) continue; const wF = n - wB; if (!wF) break; sB += v * h2[v];
+    const mB = sB / wB, mF = (sumAll - sB) / wF, between = wB * wF * (mB - mF) ** 2; if (between > best) { best = between; thr = v; } }
+  const W = c.width, H = c.height, dark = new Uint8Array(W * H);
+  for (let p = 0; p < W * H; p++) dark[p] = d[p * 4] < thr ? 1 : 0;
+  // flood-fill dark regions connected to the edges (borders, crowns, frame lines); 'plain' skips it
+  if (binarize !== 'plain') {
     const stack = [];
     for (let x = 0; x < W; x++) { stack.push(x, (H - 1) * W + x); }
     for (let y = 0; y < H; y++) { stack.push(y * W, y * W + W - 1); }
@@ -418,8 +469,8 @@ function cropForOcr(src, card, r, targetW = 900, binarize = false, forceInvert =
       if (x > 0) stack.push(p - 1); if (x < W - 1) stack.push(p + 1);
       if (p >= W) stack.push(p - W); if (p < W * (H - 1)) stack.push(p + W);
     }
-    for (let p = 0; p < W * H; p++) { const v = dark[p] ? 0 : 255; d[p * 4] = d[p * 4 + 1] = d[p * 4 + 2] = v; }
   }
+  for (let p = 0; p < W * H; p++) { const v = dark[p] ? 0 : 255; d[p * 4] = d[p * 4 + 1] = d[p * 4 + 2] = v; }
   g.putImageData(im, 0, 0);
   return c;
 }
@@ -431,6 +482,10 @@ const NAME_VARIANTS = [
   { zone: NAME_ZONE, bin: true },
   { zone: { x: 0.06, y: 0.035, w: 0.74, h: 0.07 }, bin: true },
   { zone: { x: 0.04, y: 0.015, w: 0.78, h: 0.12 }, bin: true },
+  // Old frames (1993–2003): light name text printed straight onto a mottled colored border. Tried only after
+  // the modern-frame crops fail: darkest RGB channel, light text, grain smoothed, tight crop without the border.
+  { zone: { x: 0.06, y: 0.035, w: 0.74, h: 0.07 }, bin: false, invert: true, channel: 'min', smooth: 3 },
+  { zone: { x: 0.06, y: 0.035, w: 0.74, h: 0.07 }, bin: 'plain', invert: true, channel: 'min', smooth: 3 },
 ];
 
 function cleanName(text) {
@@ -445,7 +500,11 @@ function cleanName(text) {
 function parseSetLine(text) {
   const t = String(text).toUpperCase().replace(/[|]/g, 'I');
   const num = (t.match(/\b0*(\d{1,4})\s*\/\s*\d{1,4}\b/) || t.match(/\b[CURMLST]\s+0*(\d{1,4})\b/) || t.match(/\b0*(\d{1,4})\b/) || [])[1];
-  const sets = [...t.matchAll(/\b([A-Z0-9]{3,5})\b\s*[•·*.\-]?\s*(?:EN|EM|FN|ENG)?\b/g)].map((m) => m[1]).filter((s) => /[A-Z]/.test(s) && !['EN', 'ENG', 'TM'].includes(s));
+  // An older card's bottom-left line is "Illus. <artist>" and a Wizards copyright, not a set code: its words
+  // would only make bogus /cards/<word>/<year> lookups. Modern lines keep working without the "•" or "EN"
+  // (OCR often drops them, and non-English printings say JA, DE, ...).
+  const hasCode = !/ILLUS|WIZARDS/.test(t);
+  const sets = !hasCode ? [] : [...t.matchAll(/\b([A-Z0-9]{3,5})\b\s*[•·*.\-]?\s*(?:EN|EM|FN|ENG)?\b/g)].map((m) => m[1]).filter((s) => /[A-Z]/.test(s) && !['EN', 'ENG', 'TM'].includes(s));
   return { num, sets };
 }
 
@@ -453,15 +512,23 @@ function parseSetLine(text) {
  * Run the full identify pipeline on an image source with the card at `card` (pixel rect).
  * Returns {card (scryfall object), text} or {card:null, text}.
  */
-async function identifyFrom(src, rect, { exact = state.settings.exact } = {}) {
+async function identifyFrom(src, rect, { exact = state.settings.exact, oldFrame = true } = {}) {
   const w = await getWorker();
   let card = null, text = '', firstText = '';
+  // gray crops by zone + settings: a thresholded variant reuses its gray twin instead of redoing crop and blur
+  const grays = new Map();
   // a few crop/cleanup variants; stop at the first one that matches a real card
   for (const v of NAME_VARIANTS) {
+    if (v.channel === 'min' && !oldFrame) continue; // old-frame crops: skipped when the caller wants a quick pass
     await w.setParameters({ tessedit_pageseg_mode: '6', tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',- " });
-    const { data } = await w.recognize(cropForOcr(src, rect, v.zone, 900, v.bin));
+    const key = JSON.stringify([v.zone, v.invert ?? null, v.channel || 'lum', v.smooth || 0]);
+    if (!grays.has(key)) grays.set(key, grayCrop(src, rect, v.zone, 900, v.invert ?? null, { channel: v.channel, smooth: v.smooth }));
+    const crop = v.bin ? copyCanvas(grays.get(key)) : grays.get(key);
+    if (v.bin) thresholdCanvas(crop, v.bin);
+    const { data } = await w.recognize(crop);
     text = cleanName(data.text);
-    if (text.replace(/[^A-Za-z]/g, '').length < 3) continue;
+    // old-frame crops read texture as short junk on an empty table: only look up longer reads from them
+    if (text.replace(/[^A-Za-z]/g, '').length < (v.channel === 'min' ? 6 : 3)) continue;
     firstText = firstText || text;
     card = await identifyByName(text);
     if (card) break;
@@ -487,7 +554,7 @@ async function identifyFrom(src, rect, { exact = state.settings.exact } = {}) {
 }
 
 // ---------------------------------------------------------------- camera
-const cam = { stream: null, running: false, auto: false, busy: false, lastSeen: null, lastAdded: null, gap: true, wake: null };
+const cam = { stream: null, running: false, auto: false, busy: false, lastSeen: null, lastAdded: null, gap: true, wake: null, oldTurn: false, misses: 0 };
 
 function guideRectInVideo() {
   const v = $('#video'), box = $('#camera').getBoundingClientRect(), gr = $('#guide').getBoundingClientRect();
@@ -540,7 +607,7 @@ async function scanOnce() {
 
 async function startAuto() {
   if (!cam.stream && !(await startCamera())) return;
-  cam.auto = true; cam.lastSeen = null; cam.gap = true;
+  cam.auto = true; cam.lastSeen = null; cam.gap = true; cam.misses = 0;
   $('#autoBtn').textContent = 'Stop auto-scan'; $('#autoBtn').classList.remove('primary');
   try { cam.wake = await navigator.wakeLock?.request('screen'); } catch {}
   status('Auto-scan on — show cards one at a time');
@@ -557,12 +624,21 @@ async function loopAuto() {
     if (!rect || cam.busy) { await sleep(300); continue; }
     cam.busy = true;
     try {
-      const { card, text } = await identifyFrom($('#video'), rect, { exact: state.settings.exact });
+      // Old-frame crops add two OCR passes to every miss, so with nothing in view they run on every other
+      // frame only. While a card is being seen, or was just added and the frame hasn't emptied, they run every
+      // frame: an old card can then be confirmed twice, and a skipped frame can't fake an empty table.
+      const oldFrame = cam.lastSeen !== null || !cam.gap || (cam.oldTurn = !cam.oldTurn);
+      const { card, text } = await identifyFrom($('#video'), rect, { exact: state.settings.exact, oldFrame });
       if (!cam.auto) break;
       if (!card) {
-        cam.gap = true; cam.lastSeen = null; $('#camera').classList.remove('found');
+        // one unreadable frame (a flicker, or a flaky old-frame read) is not an empty table: only two misses in a
+        // row count as a gap, so a card that stays in view isn't added again
+        cam.misses = (cam.misses || 0) + 1;
+        if (cam.misses >= 2) cam.gap = true;
+        cam.lastSeen = null; $('#camera').classList.remove('found');
         status(text ? `Reading… "${text}"` : 'Waiting for a card…');
       } else {
+        cam.misses = 0;
         // need the same card twice in a row; re-add the same name only after the frame changed
         if (cam.lastSeen === card.id && (cam.gap || cam.lastAdded !== card.oracle_id)) {
           const s = cache(card); addScanned(s, { quiet: true }); beep();
@@ -1387,4 +1463,4 @@ function init() {
 init();
 
 // exposed for testing in the console
-window.__mtg = { cropForOcr, identifyFrom, cleanName, parseSetLine, parseList, toCsv, synergyTags, SYNERGY_RULES, state: () => state };
+window.__mtg = { cropForOcr, grayOf, boxBlur, identifyFrom, cleanName, parseSetLine, parseList, toCsv, synergyTags, SYNERGY_RULES, state: () => state };

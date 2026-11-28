@@ -160,13 +160,22 @@ function analyzeDeck(entries, cards, format) {
   const types = {}, pips = { W: 0, U: 0, B: 0, R: 0, G: 0 }, sources = { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 };
   let lands = 0;
   const keywords = {};
+  // commander colour identity (union of the commanders' identities), needed before sources are counted
+  const identity = new Set(commanders.flatMap((r) => r.card.colors || []));
+  // In Commander a mana source only ever makes the commander's colors ("one mana of any color" means
+  // one of those), so a produced color outside the identity is not a source of it. Everywhere else
+  // (other formats, or a Commander deck with no commander chosen yet) every color still counts.
+  const sourceOk = format === 'commander' && commanders.length ? (m) => m === 'C' || identity.has(m) : () => true;
   for (const r of played) {
     const c = r.card, t = primaryType(c.type);
     types[t] = (types[t] || 0) + r.qty;
     for (const k of c.keywords || []) (keywords[k] = keywords[k] || []).push(c.name);
+    // lands, rocks and mana creatures are sources; a ritual (instant/sorcery) makes mana once, so it isn't,
+    // unless its other face is a land (Zendikar Rising "Sorcery // Land" cards)
+    const ritual = (t === 'Instant' || t === 'Sorcery') && !/\bLand\b/.test(c.type || '');
+    if (!ritual) for (const m of c.produced || []) if (m in sources && sourceOk(m)) sources[m] += r.qty;
     if (t === 'Land') {
       lands += r.qty;
-      for (const m of c.produced || []) if (m in sources) sources[m] += r.qty;
       continue;
     }
     const mv = Number(c.cmc) || 0;
@@ -177,9 +186,6 @@ function analyzeDeck(entries, cards, format) {
     const p = pipsOf(c.mana);
     for (const col of COLORS) pips[col] += p[col] * r.qty;
   }
-
-  // commander colour identity (union of the commanders' identities)
-  const identity = new Set(commanders.flatMap((r) => r.card.colors || []));
 
   // legality
   const fmt = LIMITS[format] ? format : null;
@@ -372,7 +378,7 @@ function statsHtml(d) {
 
     <div class="panel"><h3>Lands & colors</h3>
       <p><b>${a.lands}</b> lands of ${a.total} cards. ${landNote}</p>
-      ${colorRows ? `<table class="colors"><thead><tr><th>Color</th><th>Symbols in costs</th><th>Lands that make it</th></tr></thead><tbody>${colorRows}</tbody></table>` : '<p class="muted">No colored mana symbols yet.</p>'}
+      ${colorRows ? `<table class="colors"><thead><tr><th>Color</th><th>Symbols in costs</th><th>Cards that make it</th></tr></thead><tbody>${colorRows}</tbody></table>` : '<p class="muted">No colored mana symbols yet.</p>'}
     </div>
 
     <div class="panel"><h3>Card types</h3><div class="chips">${types || '<span class="muted">No cards yet.</span>'}</div></div>
