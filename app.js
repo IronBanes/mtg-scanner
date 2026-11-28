@@ -333,6 +333,7 @@ async function refreshPrices(ids) {
 
 // name lookups from OCR text, cached per session
 const lookupCache = new Map();
+const prefixCache = new Map(); // first word -> card names starting with it (Scryfall autocomplete)
 async function identifyByName(text) {
   const key = norm(text);
   if (key.length < 3) return null;
@@ -354,20 +355,24 @@ async function identifyByName(text) {
     if (words.length > 2) card = (await tryFuzzy(words.slice(1).join(' '))) || (await tryFuzzy(words.slice(0, -1).join(' ')));
   }
   // Fuzzy search isn't spelling distance: glare turned "Spectral Sliver" into "spectral Shiver", and fuzzy said
-  // Spectral Shift. When the match isn't near-exact, list the names that start with the read's first long word
-  // and take the closest spelling if it's clearly closer (one extra request, only for imperfect matches).
+  // Spectral Shift. When the match is imperfect, list the names that start with the read's first long word and
+  // take the closest spelling if it's clearly closer. The name list is cached per word, so the glare reads of
+  // one card (which differ every frame but share "spectral") cost one extra request, not one per frame.
+  let unsure = false; // the re-check failed on the network: return the fuzzy match, but don't cache it
   const fit = (name) => Math.max(levRatio(text, frontName(name)), levRatio(text, name));
   const first = text.split(' ').find((w) => w.replace(/[^A-Za-z]/g, '').length >= 4);
-  if (card && first && fit(card.name) < 0.95) {
+  if (card && first && fit(card.name) < 0.9) {
     try {
-      const ac = await sf('/cards/autocomplete?q=' + encodeURIComponent(first));
+      const word = norm(first);
+      if (!prefixCache.has(word)) prefixCache.set(word, (await sf('/cards/autocomplete?q=' + encodeURIComponent(first))).data || []);
       let best = null, bestFit = fit(card.name) + 0.05;
-      for (const n of ac.data || []) if (fit(n) > bestFit) { best = n; bestFit = fit(n); }
+      for (const n of prefixCache.get(word)) if (fit(n) > bestFit) { best = n; bestFit = fit(n); }
       if (best) card = await sf('/cards/named?exact=' + encodeURIComponent(best));
-    } catch {} // keep the fuzzy match if the re-check fails
+    } catch (e) { if (e.status !== 404) unsure = true; }
   }
   const minRatio = key.length < 6 ? 0.8 : 0.6; // short reads must match closely
   if (card && levRatio(text, frontName(card.name)) < minRatio && levRatio(text, card.name) < minRatio) card = null;
+  if (unsure) return card;
   if (card || !netError) lookupCache.set(key, card);
   else throw new Error('Can’t reach Scryfall — check your connection');
   return card;
@@ -558,10 +563,11 @@ async function identifyFrom(src, rect, { exact = state.settings.exact, oldFrame 
     text = cleanName(data.text);
     // old-frame crops read texture as short junk on an empty table: only look up longer reads from them
     if (text.replace(/[^A-Za-z]/g, '').length < (v.channel === 'min' ? 6 : 3)) continue;
+    if (!looksLikeName(text)) continue; // noise: no Scryfall lookup, and not reported as "read something"
     firstText = firstText || text;
-    if (!looksLikeName(text)) continue; // noise: no Scryfall lookup
     card = await identifyByName(text);
-    if (card) { lastNameVariant = vi; break; }
+    // promote this crop only on a clean read: one lucky match from a loose, noisy crop shouldn't lead from now on
+    if (card) { if (levRatio(text, frontName(card.name)) >= 0.8) lastNameVariant = vi; break; }
   }
   if (!card) return { card: null, text: firstText };
   if (exact) {

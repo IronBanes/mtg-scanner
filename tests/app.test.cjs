@@ -481,6 +481,24 @@ test('auto-scan uses the old-frame crops only with "Scanning old cards" on, and 
   // three frames that read something but match nothing: tilt hint
   const glare = await run(false, Array(12).fill('Spectral Shiver'), 3);
   assert.match(glare.status, /tilt the card/);
+  // review (Sonnet): an empty table that OCRs as noise is not glare; keep "Waiting for a card…"
+  const empty = await run(false, Array(12).fill('me SE BRO oer iy YE ZR gag'), 3);
+  assert.equal(empty.status, 'Waiting for a card…');
+});
+
+test('review: a failed re-rank returns the fuzzy match without caching it; the name list is cached per word', async () => {
+  let acCalls = 0, acDown = true;
+  const a = app({ route: (url) => {
+    if (url.pathname === '/cards/named' && url.searchParams.get('fuzzy')) return ok(card('shift', { name: 'Spectral Shift', oracle_id: 'shift-oracle' }));
+    if (url.pathname === '/cards/autocomplete') { acCalls++; return acDown ? failure(503) : ok({ data: ['Spectral Shift', 'Spectral Sliver'] }); }
+    if (url.searchParams.get('exact') === 'Spectral Sliver') return ok(card('sliver', { name: 'Spectral Sliver', oracle_id: 'sliver-oracle' }));
+    return failure(404);
+  } });
+  assert.equal((await a.call('identifyByName', 'spectral Shiver')).name, 'Spectral Shift', 'network trouble: fall back to fuzzy');
+  acDown = false;
+  assert.equal((await a.call('identifyByName', 'spectral Shiver')).name, 'Spectral Sliver', 'not cached, so the next read re-checks');
+  assert.equal((await a.call('identifyByName', 'Spectral Slivor')).name, 'Spectral Sliver');
+  assert.equal(acCalls, 2, 'the second glare read reuses the cached "spectral" name list');
 });
 
 test('shopping list counts only main and commander, groups printings, and prices the missing copies', () => {
