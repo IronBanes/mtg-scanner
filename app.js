@@ -164,6 +164,99 @@ function pairingOf(keywords, oracle, frontType) {
   if (/\bTime Lord Doctor\b/.test(frontType)) return { kind: 'doctor' };
   return null;
 }
+
+/** True when some sentence has YOU discarding ("Draw two cards, then discard a card."), not another player
+    ("…unless they discard a card", "Target player discards…"), since only your discards fill your graveyard. */
+function youDiscard(text) {
+  return String(text || '').split(/[.;\n]/).some((s) => /\bdiscard (a|an|one|two|three|x|\d+|your|that|this|it)\b/i.test(s)
+    && !/\b(they|opponents?|players?)\b[^.]*\bdiscard\b/i.test(s));
+}
+
+/** Deck themes worth spotting in rules text: which cards make the thing, which reward it.
+    One table so the patterns are easy to tune; `thing` is how a hint names the theme. */
+const SYNERGY_RULES = {
+  tokens: {
+    name: 'Tokens', thing: 'tokens',
+    desc: 'Token makers and cards that reward them.',
+    make: [/\bcreate[s]? [^\n]* token/i],
+    pay: [/\bwhenever [^\n]* token/i, /tokens you control/i, /creatures you control get \+\d+\/\+\d+/i],
+    makeKw: [], payKw: [],
+  },
+  sacrifice: {
+    name: 'Sacrifice', thing: 'sacrifices',
+    desc: 'Sacrificing your own permanents, and cards that trigger when things die.',
+    costsOnly: true, // "Sacrifice a creature:" is a cost you choose to pay; a "Whenever…" trigger is not
+    make: [/\bsacrifice (a|another|an|one|two|three|x|\d+) (creature|artifact|permanent|noncreature)/i],
+    pay: [/\bwhenever [^\n]* creature( you control)? dies/i, /\bwhenever you sacrifice/i],
+    makeKw: [], payKw: [],
+  },
+  counters: {
+    name: '+1/+1 counters', thing: '+1/+1 counters',
+    desc: 'Putting +1/+1 counters on things, and cards that care about them.',
+    make: [/\bput (a|one|two|three|x|that many|\d+) [^\n]*\+1\/\+1 counter/i],
+    pay: [/\bwith (one or more|a|an|one|two|three|\d+) [^\n]*\+1\/\+1 counter/i, /\bfor each [^\n]*\+1\/\+1 counter/i, /\bwhenever [^\n]*\+1\/\+1 counters? (is|are) put/i],
+    makeKw: ['Proliferate'], payKw: [],
+  },
+  graveyard: {
+    name: 'Graveyard', thing: 'cards in your graveyard',
+    desc: 'Filling your graveyard, and playing cards out of it.',
+    // "discard a card" is you filling your own graveyard; "target player discards" (hand attack) is not
+    make: [/\bmill\b/i, /\bsurveil\b/i, youDiscard],
+    pay: [/from your graveyard/i],
+    makeKw: ['Mill', 'Surveil'], payKw: ['Flashback', 'Unearth', 'Escape', 'Delve', 'Disturb', 'Embalm', 'Eternalize'],
+  },
+  spells: {
+    name: 'Spells', thing: 'instant and sorcery spells',
+    desc: 'Casting instants and sorceries, and cards that reward it.',
+    make: [], // the instants and sorceries themselves enable this, counted by card type in synergies()
+    pay: [/\bwhenever you cast (a|an) (instant|sorcery|noncreature)/i],
+    makeKw: [], payKw: ['Prowess', 'Magecraft'],
+  },
+  lifegain: {
+    name: 'Lifegain', thing: 'life gain',
+    desc: 'Gaining life, and cards that reward it.',
+    stripPay: true, // "Whenever you gain life" is a payoff, not this card gaining life
+    make: [/\bgains? \d+ life/i, /\bgains? life\b/i],
+    pay: [/\bwhenever you gain life/i, /\bif you gained life/i],
+    makeKw: ['Lifelink'], payKw: [],
+  },
+  artifacts: {
+    name: 'Artifacts', thing: 'artifacts',
+    desc: 'Artifact decks, and cards that reward artifacts.',
+    make: [], // the artifacts themselves enable this, counted by card type in synergies()
+    pay: [/\bartifacts? you control/i, /\bwhenever (a|an|another|\d+) artifact/i],
+    makeKw: [], payKw: ['Affinity', 'Improvise', 'Metalcraft'],
+  },
+  landfall: {
+    name: 'Landfall', thing: 'lands entering',
+    desc: 'Playing extra lands, and cards that trigger when lands enter.',
+    make: [/\bsearch your library for [^\n]* land/i, /\bput [^\n]*land[^\n]* onto the battlefield/i, /\bplay an additional land/i],
+    pay: [/\bwhenever a land( you control)? enters/i],
+    makeKw: [], payKw: ['Landfall'],
+  },
+};
+/** Lines that are not trigger clauses: costs and effects you choose ("Sacrifice a creature:"), not "Whenever…". */
+function chosenLines(oracle) {
+  return String(oracle || '').split('\n').filter((l) => !/^\s*(when|whenever|if|at)\b/i.test(l)).join('\n');
+}
+/** The oracle text without this theme's payoff wording, so a payoff is not also its own enabler. */
+function withoutPay(oracle, rule) {
+  return rule.pay.reduce((t, re) => t.replace(new RegExp(re.source, 'gi'), ''), String(oracle || ''));
+}
+/** Tags for the Synergies panel: "<theme>:make" / "<theme>:pay" strings, sorted (a card can have several, or none). */
+function synergyTags(oracle, frontType, keywords) {
+  const tags = [];
+  const kw = keywords || [];
+  const text = String(oracle || '');
+  for (const [theme, rule] of Object.entries(SYNERGY_RULES)) {
+    let source = text;
+    if (rule.costsOnly) source = chosenLines(source);
+    if (rule.stripPay) source = withoutPay(source, rule);
+    if (rule.make.some((m) => (typeof m === 'function' ? m(source) : m.test(source))) || rule.makeKw.some((k) => kw.includes(k))) tags.push(theme + ':make');
+    if (rule.pay.some((re) => re.test(text)) || rule.payKw.some((k) => kw.includes(k))) tags.push(theme + ':pay');
+  }
+  return tags.sort();
+}
 function slim(c) {
   const face = c.card_faces && c.card_faces[0];
   const img = c.image_uris || (face && face.image_uris) || {};
@@ -178,6 +271,7 @@ function slim(c) {
     partner: keywords.includes('Partner') || /Partner with|Choose a Background/i.test(oracle) || /\bBackground\b/.test(frontType),
     anyNumber: /deck can have any number of cards named/i.test(oracle),
     copyLimit: copyLimitOf(oracle), pairing: pairingOf(keywords, oracle, frontType),
+    tags: synergyTags(oracle, frontType, keywords),
     id: c.id, name: c.name, set: c.set, set_name: c.set_name, cn: c.collector_number,
     rarity: c.rarity, type: c.type_line || (face && face.type_line) || '',
     mana: c.mana_cost ?? (face && face.mana_cost) ?? '', cmc: c.cmc,
@@ -1222,4 +1316,4 @@ function init() {
 init();
 
 // exposed for testing in the console
-window.__mtg = { cropForOcr, identifyFrom, cleanName, parseSetLine, parseList, toCsv, state: () => state };
+window.__mtg = { cropForOcr, identifyFrom, cleanName, parseSetLine, parseList, toCsv, synergyTags, SYNERGY_RULES, state: () => state };

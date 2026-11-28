@@ -684,3 +684,58 @@ test('a legacy save with no prev loads, renders and saves without adding one', (
   b.call('renderAll');
   assert.match(b.element('#collStats').innerHTML, /<span class="chg up">▲ \$0\.50<\/span>/);
 });
+
+test('synergyTags reads each theme out of real rules text (one make and one pay per theme)', () => {
+  const a = app();
+  const tags = (oracle, keywords = []) => json(a.call('synergyTags', oracle, 'Creature — Human', keywords));
+  for (const [label, oracle, keywords, expected] of [
+    ['tokens make', 'Create a 1/1 white Spirit creature token.', [], ['tokens:make']],
+    ['tokens pay (tokens you control)', 'Creature tokens you control get +1/+1 and have vigilance.', [], ['tokens:pay']],
+    ['tokens pay (anthem)', 'Creatures you control get +1/+1.', [], ['tokens:pay']],
+    ['sacrifice make (cost)', 'Sacrifice a creature: Add one mana of any color.', [], ['sacrifice:make']],
+    ['sacrifice pay (dies)', 'Whenever another creature you control dies, draw a card.', [], ['sacrifice:pay']],
+    ['sacrifice pay (you sacrifice)', 'Whenever you sacrifice a permanent, put a +1/+1 counter on this creature.', [], ['counters:make', 'sacrifice:pay']],
+    ['counters make (put)', 'Put two +1/+1 counters on target creature you control.', [], ['counters:make']],
+    ['counters make (Proliferate)', 'Proliferate.', ['Proliferate'], ['counters:make']],
+    ['counters pay (enters with)', 'This creature enters the battlefield with a +1/+1 counter on it.', [], ['counters:pay']],
+    ['counters pay (for each)', 'This creature gets +1/+1 for each +1/+1 counter on it.', [], ['counters:pay']],
+    ['graveyard make (mill)', 'Mill three cards, then draw a card.', [], ['graveyard:make']],
+    ['graveyard make (surveil keyword)', 'Surveil 2.', ['Surveil'], ['graveyard:make']],
+    ['graveyard pay (from your graveyard)', 'You may cast this card from your graveyard for its flashback cost.', ['Flashback'], ['graveyard:pay']],
+    ['spells pay', 'Whenever you cast an instant or sorcery spell, put a +1/+1 counter on this creature.', [], ['counters:make', 'spells:pay']],
+    ['spells pay (Prowess)', 'Prowess.', ['Prowess'], ['spells:pay']],
+    ['lifegain make (N life)', 'Whenever this creature attacks, you gain 2 life.', [], ['lifegain:make']],
+    ['lifegain make (Lifelink)', 'Lifelink', ['Lifelink'], ['lifegain:make']],
+    ['lifegain pay', 'Whenever you gain life, put a +1/+1 counter on this creature.', [], ['counters:make', 'lifegain:pay']],
+    ['artifacts pay', 'This creature gets +1/+0 for each artifact you control.', [], ['artifacts:pay']],
+    ['artifacts pay (Metalcraft)', 'Metalcraft — This creature has trample as long as you control three or more artifacts.', ['Metalcraft'], ['artifacts:pay']],
+    ['landfall make (search)', 'Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.', [], ['landfall:make']],
+    ['landfall pay (Landfall)', 'Landfall — Whenever a land enters the battlefield under your control, you may gain 1 life.', ['Landfall'], ['landfall:pay', 'lifegain:make']],
+  ]) {
+    assert.deepEqual(tags(oracle, keywords), expected, label + ': ' + oracle.slice(0, 40) + '…');
+  }
+  // the wording, not just the letter case, must be what the patterns expect
+  assert.deepEqual(tags('CREATE A 1/1 GOBLIN TOKEN.'), ['tokens:make'], 'matching is case-insensitive');
+  assert.deepEqual(tags('Whenever you sacrifice a creature, draw a card.'), ['sacrifice:pay'], 'a "Whenever you sacrifice" trigger is a payoff, not a cost');
+  assert.deepEqual(tags('Trample, vigilance'), [], 'a vanilla creature gets no tags');
+  // review: discarding your own cards fills your graveyard; making an opponent discard does not
+  assert.deepEqual(tags('Draw two cards, then discard a card.'), ['graveyard:make']);
+  assert.deepEqual(tags('Target player reveals their hand. You choose a nonland card from it. That player discards that card.'), []);
+  assert.deepEqual(tags('Whenever an opponent casts a spell, that player loses 5 life unless they discard a card.'), []);
+  assert.deepEqual(tags('Each opponent loses 2 life. Then discard a card.'), ['graveyard:make'], 'your own discard in a later sentence still counts');
+  assert.deepEqual(tags(''), [], 'no rules text, no tags');
+  assert.deepEqual(json(a.call('synergyTags', undefined, 'Creature', undefined)), [], 'missing pieces are tolerated');
+});
+
+test('slim() saves tags on every card (empty when none), and SYNERGY_RULES covers the eight themes', () => {
+  const a = app();
+  const tagged = a.call('cache', card('burst', { name: 'Token Burst', type_line: 'Sorcery', oracle_text: 'Create two 1/1 green Saproling creature tokens.' }));
+  assert.deepEqual(json(tagged.tags), ['tokens:make']);
+  const plain = a.call('cache', card('grunt', { name: 'Grizzly Grunt', type_line: 'Creature — Bear', oracle_text: 'Trample' }));
+  assert.deepEqual(json(plain.tags), [], 'a vanilla creature saves an empty array');
+  const rules = a.eval('SYNERGY_RULES');
+  assert.deepEqual(Object.keys(rules), ['tokens', 'sacrifice', 'counters', 'graveyard', 'spells', 'lifegain', 'artifacts', 'landfall']);
+  for (const rule of Object.values(rules)) {
+    for (const key of ['name', 'thing', 'desc', 'make', 'pay', 'makeKw', 'payKw']) assert.ok(key in rule, 'theme rule has ' + key);
+  }
+});
