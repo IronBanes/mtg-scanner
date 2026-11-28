@@ -75,6 +75,23 @@ test('backup restore rejects damaged inputs and can recover a blocked save', asy
   assert.deepEqual(JSON.parse(a.stored.get(storageKey)).recent, [{ cardId: 'sol-ring' }]);
 });
 
+test('review: a backup with a bad trade count is rejected; an import Count is never negative', async () => {
+  const a = app({ raw: '{' });
+  a.element('#settingsBtn').onclick();
+  const restore = async (data) => {
+    await a.element('#bkImport').onchange({ target: { files: [{ text: async () => JSON.stringify(data) }] } });
+    a.flush();
+  };
+  for (const trade of ['<img src=x onerror=alert(1)>', 3, -1, 1.5]) {
+    await restore({ app: 'mtgscan', ...saved({ collection: [{ cardId: 'sol-ring', qty: 2, trade }] }) });
+    assert.equal(a.stored.get(storageKey), '{', 'rejected: ' + trade);
+    assert.match(a.element('#toast').innerHTML, /trade count/);
+  }
+  await restore({ app: 'mtgscan', ...saved({ collection: [{ cardId: 'sol-ring', qty: 2, trade: 2 }] }) });
+  assert.equal(JSON.parse(a.stored.get(storageKey)).collection[0].trade, 2, 'a valid trade count restores');
+  assert.deepEqual(json(a.call('parseList', 'Count,Name\n-1,Sol Ring\n0,Opt')).map((x) => x.qty), [1, 1]);
+});
+
 test('scan-only logs price checks; bulk add counts each scan once', () => {
   const a = app();
   const c = a.call('cache', card());

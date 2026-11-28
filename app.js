@@ -806,8 +806,8 @@ function tradeHtml(c) {
   const rows = [false, true].map((foil) => state.collection.find((x) => x.cardId === c.id && !!x.foil === foil)).filter(Boolean);
   if (!rows.length) return '';
   return `<div class="trade-block"><h3>For trade</h3>${rows.map((e) => `<div class="trade-row">
-    <span>${e.foil ? 'Foil' : 'Normal'}</span><span class="muted">own ${e.qty}</span>
-    <div class="qty"><button data-trade="-1" data-foil="${e.foil ? 1 : 0}">−</button><b>${e.trade || 0}</b><button data-trade="1" data-foil="${e.foil ? 1 : 0}">+</button></div>
+    <span>${e.foil ? 'Foil' : 'Normal'}</span><span class="muted">own ${Number(e.qty) || 0}</span>
+    <div class="qty"><button data-trade="-1" data-foil="${e.foil ? 1 : 0}">−</button><b>${Number(e.trade) || 0}</b><button data-trade="1" data-foil="${e.foil ? 1 : 0}">+</button></div>
   </div>`).join('')}</div>`;
 }
 
@@ -1131,7 +1131,8 @@ function parseList(text) {
     if (/^(\/\/|#)/.test(l)) return;
     if (csvCols) {
       const c = splitCsv(l), get = (...ks) => { for (const k of ks) { const i = csvCols.findIndex((x) => x === k || x.startsWith(k)); if (i >= 0 && c[i]) return c[i]; } return ''; };
-      out.push({ qty: parseInt(get('count', 'quantity', 'qty')) || 1, name: get('name', 'card'), set: get('set code', 'set', 'edition code').toLowerCase(), cn: get('collector'), foil: /foil|etched|yes|true/i.test(get('foil', 'finish')), board: (get('board') || board).toLowerCase() });
+      // an import only adds: a negative Count must not lower qty (and leave trade > qty)
+      out.push({ qty: Math.max(1, parseInt(get('count', 'quantity', 'qty')) || 1), name: get('name', 'card'), set: get('set code', 'set', 'edition code').toLowerCase(), cn: get('collector'), foil: /foil|etched|yes|true/i.test(get('foil', 'finish')), board: (get('board') || board).toLowerCase() });
       return;
     }
     let m = l.match(/^(?:SB:\s*)?(\d+)\s*x?\s+(.+)$/i); let qty = 1, rest = l;
@@ -1251,7 +1252,11 @@ function validateBackup(d) {
     if (!e || typeof e !== 'object' || !SAFE_ID.test(String(e.cardId))) bad('card id');
     if (needQty && !(Number.isFinite(e.qty) && e.qty > 0)) bad('quantity');
   };
-  d.collection.forEach((e) => entry(e, true));
+  d.collection.forEach((e) => {
+    entry(e, true);
+    // trade (trade binder) is optional, but when present it must be a whole number from 0 to qty
+    if ('trade' in e && !(Number.isInteger(e.trade) && e.trade >= 0 && e.trade <= e.qty)) bad('trade count');
+  });
   d.recent.forEach((e) => entry(e, false));
   d.decks.forEach((dk) => {
     if (!dk || !SAFE_ID.test(String(dk.id)) || typeof dk.name !== 'string' || !Array.isArray(dk.cards)) bad('deck');
