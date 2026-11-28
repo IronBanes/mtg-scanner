@@ -608,10 +608,11 @@ function edgePair(arr, size) {
 }
 /**
  * Find the card's real edges near the guide (a card that isn't lined up exactly): straight edges a card's
- * height apart (70–125% of the guide), then a pair a card's width apart. Returns a source-pixel rect, or null
- * when nothing card-shaped stands out (an empty table, a white card on a white desk).
+ * height apart (`sizes`: 70–125% of the guide by default), then a pair a card's width apart. Both pairs must
+ * exist, so a single strong line (a desk seam, a deck box) isn't taken for a card. Returns a source-pixel rect
+ * inside the source, or null when nothing card-shaped stands out or the card runs off the image.
  */
-function findCardEdges(src, guide, srcW, srcH) {
+function findCardEdges(src, guide, srcW, srcH, { sizes = [0.7, 1.25] } = {}) {
   const ar = 63 / 88, pad = 0.15;
   const x0 = Math.max(0, guide.x - guide.w * pad), y0 = Math.max(0, guide.y - guide.h * pad);
   const rw = Math.min(srcW, guide.x + guide.w * (1 + pad)) - x0, rh = Math.min(srcH, guide.y + guide.h * (1 + pad)) - y0;
@@ -624,31 +625,33 @@ function findCardEdges(src, guide, srcW, srcH) {
   for (let p = 0; p < W * H; p++) L[p] = grayOf(d[p * 4], d[p * 4 + 1], d[p * 4 + 2]);
   const { col, row } = edgeProfiles(L, W, H);
   let tb = null;
-  for (let f = 0.7; f <= 1.25; f += 0.02) { const p = edgePair(row, (guide.h * f) / k); if (p && (!tb || p.s > tb.s)) tb = p; }
+  for (let f = sizes[0]; f <= sizes[1] + 1e-9; f += 0.02) { const p = edgePair(row, (guide.h * f) / k); if (p && (!tb || p.s > tb.s)) tb = p; }
   if (!tb) return null;
   const hN = tb.b - tb.a, lr = edgePair(col, hN * ar);
-  // no clear left/right pair (a sleeve stack, a busy mat): keep the guide's middle, sized to the card's height
-  const xL = lr ? lr.a : (guide.x + guide.w / 2 - x0) / k - (hN * ar) / 2, wN = lr ? lr.b - lr.a : hN * ar;
-  return { x: x0 + xL * k, y: y0 + tb.a * k, w: wN * k, h: hN * k };
+  if (!lr) return null; // no matching side edges: not clearly a card
+  const r = { x: x0 + lr.a * k, y: y0 + tb.a * k, w: (lr.b - lr.a) * k, h: hN * k };
+  // stay inside the image: a box that runs off it would darken the crop and cut the name
+  return r.x >= 0 && r.y >= 0 && r.x + r.w <= srcW && r.y + r.h <= srcH ? r : null;
 }
 /**
  * Read the card in `guide`, and if that fails, look for the card's real edges and read again there, but only
  * when they're noticeably off the guide. Lining the card up costs nothing extra; a card that's a bit off, too
  * small or too big in the guide gets a second chance. Returns identifyFrom's result plus the rect that worked.
  */
-async function identifyNearGuide(src, guide, srcW, srcH, opts) {
+async function identifyNearGuide(src, guide, srcW, srcH, opts = {}, { retry = true, sizes } = {}) {
   const first = await identifyFrom(src, guide, opts);
-  if (first.card) return { ...first, rect: guide };
-  const found = findCardEdges(src, guide, srcW, srcH);
+  if (first.card || !retry) return first;
+  const found = findCardEdges(src, guide, srcW, srcH, { sizes });
   const off = found && (Math.abs(found.y - guide.y) > guide.h * 0.03 || Math.abs(found.h - guide.h) > guide.h * 0.05
     || Math.abs(found.x - guide.x) > guide.w * 0.04);
-  if (!off) return { ...first, rect: guide };
+  if (!off) return first;
   const again = await identifyFrom(src, found, opts);
-  return again.card ? { ...again, rect: found } : { ...first, rect: guide };
+  // keep the retry's text when the guide read nothing, so "Couldn't match…" and the glare hint still see it
+  return again.card || !first.text ? again : first;
 }
 
 // ---------------------------------------------------------------- camera
-const cam = { stream: null, running: false, auto: false, busy: false, lastSeen: null, lastAdded: null, gap: true, wake: null, misses: 0 };
+const cam = { stream: null, running: false, auto: false, busy: false, lastSeen: null, lastAdded: null, gap: true, wake: null, misses: 0, foundAt: 0 };
 
 function guideRectInVideo() {
   const v = $('#video'), box = $('#camera').getBoundingClientRect(), gr = $('#guide').getBoundingClientRect();
@@ -666,7 +669,7 @@ async function startCamera() {
       audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 } },
     });
     const v = $('#video'); v.srcObject = cam.stream; await v.play();
-    $('#camera').scrollIntoView?.({ block: 'start', behavior: 'smooth' }); // the camera gets the screen
+    $('#camera').scrollIntoView?.({ block: 'center', behavior: 'smooth' }); // bring the camera into view, clear of the top bar
     try { const [track] = cam.stream.getVideoTracks(); const caps = track.getCapabilities?.() || {};
       if (caps.focusMode?.includes('continuous')) await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch {}
     $('#camMsg').classList.add('hidden');
@@ -727,7 +730,8 @@ async function loopAuto() {
     try {
       // Old-frame crops add two OCR passes to every miss, so auto-scan only uses them when "Scanning old cards"
       // is on in Settings. The shutter and Photo buttons always try them.
-      const v = $('#video'), { card, text } = await identifyNearGuide(v, rect, v.videoWidth, v.videoHeight, { exact: state.settings.exact, oldFrame: !!state.settings.oldCards });
+      const v = $('#video'), { card, text } = await identifyNearGuide(v, rect, v.videoWidth, v.videoHeight, { exact: state.settings.exact, oldFrame: !!state.settings.oldCards },
+        { retry: (cam.misses || 0) % 2 === 0 }); // edge retry on every other miss, so a busy table can't double every frame
       if (!cam.auto) break;
       if (!card) {
         // one unreadable frame (a flicker, or a flaky old-frame read) is not an empty table: only two misses in a
@@ -747,9 +751,12 @@ async function loopAuto() {
           const s = cache(card); addScanned(s, { quiet: true }); beep();
           cam.lastAdded = card.oracle_id; cam.gap = false;
           outline('found'); status(`✓ ${s.name} — ${money(unitPrice(s, foilOn()))}. Next card!`);
-          setTimeout(() => $('#camera').classList.contains('found') && outline(null), 600);
+          const at = (cam.foundAt = Date.now()); // only this add's timer may clear its green
+          setTimeout(() => cam.foundAt === at && $('#camera').classList.contains('found') && outline(null), 600);
         } else if (cam.lastAdded !== card.oracle_id || cam.gap) {
           outline('seeing'); status(`Seeing ${card.name}… hold still`);
+        } else if (!$('#camera').classList.contains('found')) {
+          outline(null); // the card already added is still in view: nothing to hold still for
         }
         cam.lastSeen = card.id;
       }
@@ -768,7 +775,9 @@ async function scanPhoto(file) {
   const rect = { x: (W - w) / 2, y: (H - h) / 2, w, h };
   status('Reading photo…');
   try {
-    const { card, text } = await identifyNearGuide(img, rect, W, H); // finds a card that doesn't fill the photo
+    // the centered box spans the photo: look for a card 60–105% of its size (on a real photo of a card filling
+    // ~79% of the frame this found it within 2%; going down to 35% picked up false edge pairs)
+    const { card, text } = await identifyNearGuide(img, rect, W, H, {}, { sizes: [0.6, 1.05] });
     if (card) { beep(); showResult(cache(card), text); status(''); }
     else status(text ? `Couldn't match "${text}" — crop the photo to the card, or tap Type` : 'No card name found in photo');
   } catch (e) { status('Error: ' + e.message); }

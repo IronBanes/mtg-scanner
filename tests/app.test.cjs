@@ -371,16 +371,42 @@ test('findCardEdges finds a card that sits off the guide, and nothing on a flat 
 });
 
 test('identifyNearGuide reads the guide first and only retries at detected edges when they are off', async () => {
-  // flat pixels: no edges, so a failed guide read is final (no second set of OCR reads)
-  const a = app({ ocr: ['', '', '', '', '', ''], route: () => ok(card()) });
-  const r = await a.call('identifyNearGuide', {}, { x: 0, y: 0, w: 200, h: 280 }, 200, 280, { exact: false });
-  assert.equal(r.card, null);
-  // a read in the guide returns at once with the guide rect
+  const opts = { exact: false, oldFrame: false };
+  // flat pixels: no edges, so a failed guide read is final (4 reads, no second set)
+  const a = app({ ocr: ['', '', '', ''], route: () => ok(card()) });
+  assert.equal((await a.call('identifyNearGuide', {}, { x: 0, y: 0, w: 200, h: 280 }, 200, 280, opts)).card, null);
+  // a read in the guide returns at once
   const b = app({ ocr: ['Sol Ring'], route: () => ok(card()) });
-  const g = { x: 0, y: 0, w: 200, h: 280 };
-  const hit = await b.call('identifyNearGuide', {}, g, 200, 280, { exact: false });
-  assert.equal(hit.card.name, 'Sol Ring');
-  assert.deepEqual(json(hit.rect), g);
+  assert.equal((await b.call('identifyNearGuide', {}, { x: 0, y: 0, w: 200, h: 280 }, 200, 280, opts)).card.name, 'Sol Ring');
+  // review (Sonnet): the real retry. The card sits 50 px right and 100 px low of the guide; the guide read fails
+  // (4 empty reads), the edges are found off the guide, and the read there finds the card
+  const guide = { x: 200, y: 200, w: 600, h: 838 };
+  const offset = (w, h) => {
+    const d = new Uint8ClampedArray(w * h * 4), k = 780 / w;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const sx = 110 + x * k, sy = 74.3 + y * k, v = sx >= 250 && sx < 850 && sy >= 300 && sy < 1138 ? 40 : 220;
+      d.set([v, v, v, 255], (y * w + x) * 4);
+    }
+    return d;
+  };
+  const c = app({ ocr: ['', '', '', '', 'Sol Ring'], route: () => ok(card()), pixels: offset });
+  assert.equal((await c.call('identifyNearGuide', {}, guide, 1000, 1400, opts)).card.name, 'Sol Ring', 'found at the detected edges');
+  // retry: false (auto-scan on alternate misses) stops after the guide read
+  const d = app({ ocr: ['', '', '', '', 'Sol Ring'], route: () => ok(card()), pixels: offset });
+  assert.equal((await d.call('identifyNearGuide', {}, guide, 1000, 1400, opts, { retry: false })).card, null);
+});
+
+test('review: findCardEdges rejects a card box that runs off the image', () => {
+  // the same offset card, but the source is only 820 px wide, so its right edge (850) is off the image
+  const a = app({ pixels: (w, h) => {
+    const d = new Uint8ClampedArray(w * h * 4), rw = Math.min(820, 200 + 600 * 1.15) - 110, k = rw / w;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const sx = 110 + x * k, sy = 74.3 + y * k, v = sx >= 250 && sy >= 300 && sy < 1138 ? 40 : 220;
+      d.set([v, v, v, 255], (y * w + x) * 4);
+    }
+    return d;
+  } });
+  assert.equal(a.call('findCardEdges', {}, { x: 200, y: 200, w: 600, h: 838 }, 820, 1400), null);
 });
 
 test('looksLikeName keeps card names and drops texture noise', () => {
