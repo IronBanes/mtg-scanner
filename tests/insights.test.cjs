@@ -547,6 +547,10 @@ test('synergies: played boards only, names once, threshold, sorting and untagged
   // one enabler and one payoff is under the >= 3 threshold
   const two = deck(a, 'Two', 'modern', [['toker', 1], ['adorer', 1], ['bear', 20], ['Forest', 38]]);
   assert.ok(!json(a.insights().synergies(two.cards, a.state().cards)).themes.some((t) => t.theme === 'tokens'));
+  // review: the threshold counts distinct cards; "twin" both makes and rewards tokens, so twin + toker is only 2
+  const both = { ...a.state().cards, twin: { ...a.state().cards.twin, tags: ['tokens:make', 'tokens:pay'] } };
+  const pair = deck(a, 'Pair', 'modern', [['toker', 1], ['twin', 1], ['bear', 20], ['Forest', 38]]);
+  assert.ok(!json(a.insights().synergies(pair.cards, both)).themes.some((t) => t.theme === 'tokens'));
 
   // entries whose card is not cached are skipped, not counted as untagged
   const ghost = json(a.insights().synergies([{ cardId: 'ghost', qty: 40, board: 'main' }], a.state().cards));

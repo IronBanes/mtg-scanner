@@ -721,6 +721,8 @@ test('synergyTags reads each theme out of real rules text (one make and one pay 
   // review: discarding your own cards fills your graveyard; making an opponent discard does not
   assert.deepEqual(tags('Draw two cards, then discard a card.'), ['graveyard:make']);
   assert.deepEqual(tags('Target player reveals their hand. You choose a nonland card from it. That player discards that card.'), []);
+  assert.deepEqual(tags('Whenever an opponent casts a spell, that player loses 5 life unless they discard a card.'), []);
+  assert.deepEqual(tags('Each opponent loses 2 life. Then discard a card.'), ['graveyard:make'], 'your own discard in a later sentence still counts');
   assert.deepEqual(tags(''), [], 'no rules text, no tags');
   assert.deepEqual(json(a.call('synergyTags', undefined, 'Creature', undefined)), [], 'missing pieces are tolerated');
 });

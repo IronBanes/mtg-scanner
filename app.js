@@ -165,6 +165,13 @@ function pairingOf(keywords, oracle, frontType) {
   return null;
 }
 
+/** True when some sentence has YOU discarding ("Draw two cards, then discard a card."), not another player
+    ("…unless they discard a card", "Target player discards…"), since only your discards fill your graveyard. */
+function youDiscard(text) {
+  return String(text || '').split(/[.;\n]/).some((s) => /\bdiscard (a|an|one|two|three|x|\d+|your|that|this|it)\b/i.test(s)
+    && !/\b(they|opponents?|players?)\b[^.]*\bdiscard\b/i.test(s));
+}
+
 /** Deck themes worth spotting in rules text: which cards make the thing, which reward it.
     One table so the patterns are easy to tune; `thing` is how a hint names the theme. */
 const SYNERGY_RULES = {
@@ -194,7 +201,7 @@ const SYNERGY_RULES = {
     name: 'Graveyard', thing: 'cards in your graveyard',
     desc: 'Filling your graveyard, and playing cards out of it.',
     // "discard a card" is you filling your own graveyard; "target player discards" (hand attack) is not
-    make: [/\bmill\b/i, /\bsurveil\b/i, /\bdiscard (a|an|one|two|three|x|\d+|your|that|this|it)\b/i],
+    make: [/\bmill\b/i, /\bsurveil\b/i, youDiscard],
     pay: [/from your graveyard/i],
     makeKw: ['Mill', 'Surveil'], payKw: ['Flashback', 'Unearth', 'Escape', 'Delve', 'Disturb', 'Embalm', 'Eternalize'],
   },
@@ -245,7 +252,7 @@ function synergyTags(oracle, frontType, keywords) {
     let source = text;
     if (rule.costsOnly) source = chosenLines(source);
     if (rule.stripPay) source = withoutPay(source, rule);
-    if (rule.make.some((re) => re.test(source)) || rule.makeKw.some((k) => kw.includes(k))) tags.push(theme + ':make');
+    if (rule.make.some((m) => (typeof m === 'function' ? m(source) : m.test(source))) || rule.makeKw.some((k) => kw.includes(k))) tags.push(theme + ':make');
     if (rule.pay.some((re) => re.test(text)) || rule.payKw.some((k) => kw.includes(k))) tags.push(theme + ':pay');
   }
   return tags.sort();

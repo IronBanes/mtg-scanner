@@ -267,7 +267,7 @@ function synergies(entries, cards) {
       }
     }
     const m = [...make], p = [...pay];
-    if (m.length + p.length < 3) continue; // too few cards to call it a theme
+    if (new Set([...m, ...p]).size < 3) continue; // too few distinct cards to call it a theme (a card can be both)
     const hint = !p.length
       ? `${m.length} cards make ${rule.thing} but nothing rewards it.`
       : !m.length
