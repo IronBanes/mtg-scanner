@@ -815,7 +815,8 @@ test('tradeOnly filters the list to trade entries and swaps in the trade stat ti
   // the filter still applies in trade view
   a.element('#collFilter').value = 'island';
   a.call('renderCollection');
-  assert.match(a.element('#collList').innerHTML, /Nothing marked for trade yet\. Open a card you own and set how many to trade\./);
+  // review: cards ARE marked for trade, the filter just hides them
+  assert.match(a.element('#collList').innerHTML, /Nothing matches\./);
   a.element('#collFilter').value = 'sol';
   a.call('renderCollection');
   assert.deepEqual(ids(), ['sol-ring', 'sol-ring']);
@@ -866,7 +867,7 @@ test('the trade value tile keeps the price-change line, computed from trade copi
   assert.match(a.element('#collStats').innerHTML, /Trade value/);
 });
 
-test('collection rows badge the trade count on the grey second line', () => {
+test('collection rows badge the trade count by the card name', () => {
   const a = app();
   a.call('cache', card());
   a.call('addTo', 'collection', 'sol-ring', false, 2);
@@ -874,8 +875,9 @@ test('collection rows badge the trade count on the grey second line', () => {
   a.call('setTrade', 'sol-ring', true, 1);
   a.call('renderCollection');
   const html = a.element('#collList').innerHTML;
-  assert.match(html, / · <span class="trade">⇄ 1 for trade<\/span>/, 'the marked entry is badged');
-  assert.equal((html.match(/class="trade"/g) || []).length, 1, 'the unmarked entry is not');
+  // review: a badge on the name line, since the grey set line is truncated on phones and hid it
+  assert.match(html, /<div class="n">Sol Ring<span class="badge foil">FOIL<\/span> <span class="badge trade" title="1 for trade">⇄ 1<\/span><\/div>/, 'the marked entry is badged');
+  assert.equal((html.match(/class="badge trade"/g) || []).length, 1, 'the unmarked entry is not');
 });
 
 test('the card popup stepper marks copies for trade without closing the popup', async () => {
@@ -897,7 +899,7 @@ test('the card popup stepper marks copies for trade without closing the popup', 
   assert.equal(entry(false).trade, 1);
   assert.equal(normal.textContent, 1, 'the number updates in place');
   assert.match(modal(), /<h2>Sol Ring<\/h2>/, 'the popup stays open');
-  assert.match(a.element('#collList').innerHTML, /⇄ 1 for trade/, 'renderAll refreshed the list behind it');
+  assert.match(a.element('#collList').innerHTML, /title="1 for trade">⇄ 1</, 'renderAll refreshed the list behind it');
   buttons[1].onclick(); // + normal → 2
   buttons[1].onclick(); // + normal → clamped at qty 2
   assert.equal(entry(false).trade, 2);

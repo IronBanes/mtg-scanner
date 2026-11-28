@@ -204,7 +204,7 @@ li.shop-total .meta .n, li.shop-total .meta .s { text-align: left; }
 .trade-row { display: flex; align-items: center; gap: 10px; font-size: 14px; }
 .trade-row + .trade-row { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }
 .trade-row .qty { margin-left: auto; } /* the stepper sits at the right; .qty buttons are 40px tap targets already */
-.trade { color: var(--accent); }
+.badge.trade { background: var(--panel2); color: var(--accent); border: 1px solid var(--line); }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0; }
 .form-grid .full { grid-column: 1 / -1; }
 

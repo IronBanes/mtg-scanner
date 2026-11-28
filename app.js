@@ -948,10 +948,11 @@ function renderCollection() {
   else list.sort((a, b) => (b.added || 0) - (a.added || 0));
   $('#collList').innerHTML = list.length ? list.map((e) => cardRow(e, {
     qtyControls: true,
-    sub: e.trade > 0 ? ` · <span class="trade">⇄ ${e.trade} for trade</span>` : '',
+    // a badge by the name (like FOIL): the grey set line is truncated on phones and would hide it
+    extra: e.trade > 0 ? ` <span class="badge trade" title="${e.trade} for trade">⇄ ${e.trade}</span>` : '', // short, to fit at 375px
   }).replace('<li ', `<li data-foil="${e.foil ? 1 : 0}" `)).join('')
-    : `<li class="empty">${tradeOnly ? 'Nothing marked for trade yet. Open a card you own and set how many to trade.'
-      : state.collection.length ? 'Nothing matches.' : 'Your collection is empty. Scan cards with “Collection” selected, or add them from Search.'}</li>`;
+    : `<li class="empty">${tradeOnly && !state.collection.some((e) => e.trade > 0) ? 'Nothing marked for trade yet. Open a card you own and set how many to trade.'
+      : tradeOnly || state.collection.length ? 'Nothing matches.' : 'Your collection is empty. Scan cards with “Collection” selected, or add them from Search.'}</li>`;
 }
 // ---------------------------------------------------------------- decks
 let openDeckId = null;
