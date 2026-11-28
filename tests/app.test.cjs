@@ -236,6 +236,10 @@ test('OCR cleans names and reads both modern and fraction collector numbers', ()
   for (const line of ['Illus. Christopher Rush\n© 1993-1995 Wizards of the Coast', 'ILLUS. MARK POOLE 123/350 ©1999 WIZARDS']) {
     assert.deepEqual(json(a.call('parseSetLine', line).sets), [], line);
   }
+  // review (Sonnet): modern lines still work when OCR drops the "•"/"EN", and for non-English printings
+  for (const [line, set] of [['U 0263 C21 EN', 'C21'], ['R 0123\nCMR JA', 'CMR'], ['M 0045 NEO', 'NEO']]) {
+    assert.ok(a.call('parseSetLine', line).sets.includes(set), line);
+  }
 });
 
 test('review: exact mode makes no printing lookups for an old card without a set code', async () => {
@@ -318,6 +322,14 @@ test('review: thresholdCanvas wipes blobs touching the edges, except in plain mo
   assert.deepEqual(run('plain'), { bar: 0, letter: 0, bg: 255 }, 'plain keeps everything dark');
 });
 
+test('review: short junk from an old-frame crop is not looked up on Scryfall', async () => {
+  // four modern crops read nothing; the old-frame crops read 5- and 4-letter texture noise
+  const a = app({ ocr: ['', '', '', '', 'Brrak', 'Weta'], route: () => ok(card()) });
+  const result = await a.call('identifyFrom', {}, { x: 0, y: 0, w: 200, h: 280 }, { exact: false });
+  assert.equal(result.card, null);
+  assert.equal(a.requests.length, 0, 'no lookups for short old-frame reads');
+});
+
 test('review: oldFrame:false skips the two old-frame crops; thresholded variants reuse their gray crop', async () => {
   let crops = 0;
   const a = app({ ocr: ['', '', '', '', 'Lightning Bolt'], pixels: (w, h) => (crops++, new Uint8ClampedArray(w * h * 4)) });
@@ -381,8 +393,10 @@ test('search ranks an exact match first, appends pages, and shows an empty resul
 test('auto-scan needs consecutive reads and only adds the same card again after a gap', async () => {
   const a = app({
     mediaDevices: { getUserMedia: async () => ({ getVideoTracks: () => [] }) },
-    // A failed read tries all six crop variants (four modern-frame, two old-frame) before the scan loop sees an empty frame.
-    ocr: ['Sol Ring', 'Sol Ring', 'Sol Ring', '', '', '', '', '', '', 'Sol Ring', 'Sol Ring'],
+    // A failed read tries all six crop variants (four modern-frame, two old-frame) right after a card was seen.
+    // One empty frame is only a flicker (no re-add); two in a row are a gap, after which the same card adds again.
+    ocr: ['Sol Ring', 'Sol Ring', 'Sol Ring', ...Array(6).fill(''), 'Sol Ring', 'Sol Ring',
+      ...Array(6).fill(''), ...Array(6).fill(''), 'Sol Ring', 'Sol Ring'],
     route: () => ok(card()),
   });
   a.state().settings.exact = false;
@@ -394,7 +408,8 @@ test('auto-scan needs consecutive reads and only adds the same card again after 
   const settleFrame = () => new Promise((resolve) => setImmediate(resolve));
   await a.element('#autoBtn').onclick();
   try {
-    for (const [frame, count] of [0, 1, 1, 1, 1, 2].entries()) {
+    // frames: see, add, see, flicker, see, see (no re-add), miss, miss (gap), see, add again
+    for (const [frame, count] of [0, 1, 1, 1, 1, 1, 1, 1, 1, 2].entries()) {
       if (frame) a.advance(150); // next scan loop iteration
       await settleFrame();
       assert.equal(a.state().recent.length, count, 'after frame ' + (frame + 1));

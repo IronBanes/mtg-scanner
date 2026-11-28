@@ -170,8 +170,10 @@ function analyzeDeck(entries, cards, format) {
     const c = r.card, t = primaryType(c.type);
     types[t] = (types[t] || 0) + r.qty;
     for (const k of c.keywords || []) (keywords[k] = keywords[k] || []).push(c.name);
-    // lands, rocks and mana creatures are sources; a ritual (instant/sorcery) makes mana once, so it isn't
-    if (t !== 'Instant' && t !== 'Sorcery') for (const m of c.produced || []) if (m in sources && sourceOk(m)) sources[m] += r.qty;
+    // lands, rocks and mana creatures are sources; a ritual (instant/sorcery) makes mana once, so it isn't,
+    // unless its other face is a land (Zendikar Rising "Sorcery // Land" cards)
+    const ritual = (t === 'Instant' || t === 'Sorcery') && !/\bLand\b/.test(c.type || '');
+    if (!ritual) for (const m of c.produced || []) if (m in sources && sourceOk(m)) sources[m] += r.qty;
     if (t === 'Land') {
       lands += r.qty;
       continue;

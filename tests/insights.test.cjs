@@ -105,6 +105,9 @@ test('review: rituals make mana once, so instants and sorceries are not counted 
   ]);
   const s = analyze(a, deck(a, 'R', 'modern', [['ritual', 4], ['rite', 4], ['elf', 4]])).sources;
   assert.deepEqual([s.B, s.R, s.G], [0, 0, 4]);
+  // review (Sonnet): a spell whose back face is a land (Zendikar Rising MDFC) is still a source
+  const b = setup([sfCard('mdfc', { type_line: 'Sorcery // Land', cmc: 3, produced_mana: ['W'] })]);
+  assert.equal(analyze(b, deck(b, 'M', 'modern', [['mdfc', 2]])).sources.W, 2);
 });
 
 test('analyzeDeck: ties for highest mana value list every card once', () => {

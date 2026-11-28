@@ -450,18 +450,17 @@ function grayCrop(src, card, r, targetW = 900, forceInvert = null, { channel = '
 function thresholdCanvas(c, binarize) {
   const g = c.getContext('2d', { willReadFrequently: true });
   const im = g.getImageData(0, 0, c.width, c.height), d = im.data, n = d.length / 4;
-  {
-    // Otsu threshold, then wipe frame lines / blobs that touch the top or bottom edge
-    const h2 = new Uint32Array(256); for (let i = 0; i < d.length; i += 4) h2[d[i] | 0]++;
-    let sumAll = 0; for (let v = 0; v < 256; v++) sumAll += v * h2[v];
-    let wB = 0, sB = 0, best = 0, thr = 128;
-    for (let v = 0; v < 256; v++) { wB += h2[v]; if (!wB) continue; const wF = n - wB; if (!wF) break; sB += v * h2[v];
-      const mB = sB / wB, mF = (sumAll - sB) / wF, between = wB * wF * (mB - mF) ** 2; if (between > best) { best = between; thr = v; } }
-    const W = c.width, H = c.height, dark = new Uint8Array(W * H);
-    for (let p = 0; p < W * H; p++) dark[p] = d[p * 4] < thr ? 1 : 0;
-    // flood-fill dark regions connected to the top/bottom edges (borders, crowns, frame lines); 'plain' skips it
+  // Otsu threshold
+  const h2 = new Uint32Array(256); for (let i = 0; i < d.length; i += 4) h2[d[i] | 0]++;
+  let sumAll = 0; for (let v = 0; v < 256; v++) sumAll += v * h2[v];
+  let wB = 0, sB = 0, best = 0, thr = 128;
+  for (let v = 0; v < 256; v++) { wB += h2[v]; if (!wB) continue; const wF = n - wB; if (!wF) break; sB += v * h2[v];
+    const mB = sB / wB, mF = (sumAll - sB) / wF, between = wB * wF * (mB - mF) ** 2; if (between > best) { best = between; thr = v; } }
+  const W = c.width, H = c.height, dark = new Uint8Array(W * H);
+  for (let p = 0; p < W * H; p++) dark[p] = d[p * 4] < thr ? 1 : 0;
+  // flood-fill dark regions connected to the edges (borders, crowns, frame lines); 'plain' skips it
+  if (binarize !== 'plain') {
     const stack = [];
-    if (binarize !== 'plain') {
     for (let x = 0; x < W; x++) { stack.push(x, (H - 1) * W + x); }
     for (let y = 0; y < H; y++) { stack.push(y * W, y * W + W - 1); }
     while (stack.length) {
@@ -470,9 +469,8 @@ function thresholdCanvas(c, binarize) {
       if (x > 0) stack.push(p - 1); if (x < W - 1) stack.push(p + 1);
       if (p >= W) stack.push(p - W); if (p < W * (H - 1)) stack.push(p + W);
     }
-    }
-    for (let p = 0; p < W * H; p++) { const v = dark[p] ? 0 : 255; d[p * 4] = d[p * 4 + 1] = d[p * 4 + 2] = v; }
   }
+  for (let p = 0; p < W * H; p++) { const v = dark[p] ? 0 : 255; d[p * 4] = d[p * 4 + 1] = d[p * 4 + 2] = v; }
   g.putImageData(im, 0, 0);
   return c;
 }
@@ -502,9 +500,10 @@ function cleanName(text) {
 function parseSetLine(text) {
   const t = String(text).toUpperCase().replace(/[|]/g, 'I');
   const num = (t.match(/\b0*(\d{1,4})\s*\/\s*\d{1,4}\b/) || t.match(/\b[CURMLST]\s+0*(\d{1,4})\b/) || t.match(/\b0*(\d{1,4})\b/) || [])[1];
-  // Only cards printed since 2015 carry a set code, always next to the language ("C21 • EN"). Without that
-  // marker the words are the artist/copyright line of an older card ("Illus. Rush © 1995 Wizards"), not codes.
-  const hasCode = /[•·*]|\b(EN|EM|FN|ENG)\b/.test(t);
+  // An older card's bottom-left line is "Illus. <artist>" and a Wizards copyright, not a set code: its words
+  // would only make bogus /cards/<word>/<year> lookups. Modern lines keep working without the "•" or "EN"
+  // (OCR often drops them, and non-English printings say JA, DE, ...).
+  const hasCode = !/ILLUS|WIZARDS/.test(t);
   const sets = !hasCode ? [] : [...t.matchAll(/\b([A-Z0-9]{3,5})\b\s*[•·*.\-]?\s*(?:EN|EM|FN|ENG)?\b/g)].map((m) => m[1]).filter((s) => /[A-Z]/.test(s) && !['EN', 'ENG', 'TM'].includes(s));
   return { num, sets };
 }
@@ -528,7 +527,8 @@ async function identifyFrom(src, rect, { exact = state.settings.exact, oldFrame 
     if (v.bin) thresholdCanvas(crop, v.bin);
     const { data } = await w.recognize(crop);
     text = cleanName(data.text);
-    if (text.replace(/[^A-Za-z]/g, '').length < 3) continue;
+    // old-frame crops read texture as short junk on an empty table: only look up longer reads from them
+    if (text.replace(/[^A-Za-z]/g, '').length < (v.channel === 'min' ? 6 : 3)) continue;
     firstText = firstText || text;
     card = await identifyByName(text);
     if (card) break;
@@ -554,7 +554,7 @@ async function identifyFrom(src, rect, { exact = state.settings.exact, oldFrame 
 }
 
 // ---------------------------------------------------------------- camera
-const cam = { stream: null, running: false, auto: false, busy: false, lastSeen: null, lastAdded: null, gap: true, wake: null, oldTurn: false };
+const cam = { stream: null, running: false, auto: false, busy: false, lastSeen: null, lastAdded: null, gap: true, wake: null, oldTurn: false, misses: 0 };
 
 function guideRectInVideo() {
   const v = $('#video'), box = $('#camera').getBoundingClientRect(), gr = $('#guide').getBoundingClientRect();
@@ -607,7 +607,7 @@ async function scanOnce() {
 
 async function startAuto() {
   if (!cam.stream && !(await startCamera())) return;
-  cam.auto = true; cam.lastSeen = null; cam.gap = true;
+  cam.auto = true; cam.lastSeen = null; cam.gap = true; cam.misses = 0;
   $('#autoBtn').textContent = 'Stop auto-scan'; $('#autoBtn').classList.remove('primary');
   try { cam.wake = await navigator.wakeLock?.request('screen'); } catch {}
   status('Auto-scan on — show cards one at a time');
@@ -625,14 +625,20 @@ async function loopAuto() {
     cam.busy = true;
     try {
       // Old-frame crops add two OCR passes to every miss, so with nothing in view they run on every other
-      // frame only; once a card has been seen they run every frame, so an old card can be confirmed twice.
-      const oldFrame = cam.lastSeen !== null || (cam.oldTurn = !cam.oldTurn);
+      // frame only. While a card is being seen, or was just added and the frame hasn't emptied, they run every
+      // frame: an old card can then be confirmed twice, and a skipped frame can't fake an empty table.
+      const oldFrame = cam.lastSeen !== null || !cam.gap || (cam.oldTurn = !cam.oldTurn);
       const { card, text } = await identifyFrom($('#video'), rect, { exact: state.settings.exact, oldFrame });
       if (!cam.auto) break;
       if (!card) {
-        cam.gap = true; cam.lastSeen = null; $('#camera').classList.remove('found');
+        // one unreadable frame (a flicker, or a flaky old-frame read) is not an empty table: only two misses in a
+        // row count as a gap, so a card that stays in view isn't added again
+        cam.misses = (cam.misses || 0) + 1;
+        if (cam.misses >= 2) cam.gap = true;
+        cam.lastSeen = null; $('#camera').classList.remove('found');
         status(text ? `Reading… "${text}"` : 'Waiting for a card…');
       } else {
+        cam.misses = 0;
         // need the same card twice in a row; re-add the same name only after the frame changed
         if (cam.lastSeen === card.id && (cam.gap || cam.lastAdded !== card.oracle_id)) {
           const s = cache(card); addScanned(s, { quiet: true }); beep();
