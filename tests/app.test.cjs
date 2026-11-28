@@ -250,6 +250,40 @@ test('exact OCR skips a wrong oracle identity and accepts a matching printing', 
   assert.deepEqual(a.requests.map(({ url }) => url.pathname), ['/cards/named', '/cards/c21/263', '/cards/c20/263']);
 });
 
+test('old-frame crops run only after the four modern-frame crops fail, and can find the card', async () => {
+  const a = app({
+    // four modern-frame reads come back as noise, then the first old-frame crop reads the name
+    ocr: ['ee', 'Te Se', '', 'xx', 'Lightning Bolt'],
+    route: (url) => (url.pathname === '/cards/named' ? ok(card('bolt', { name: 'Lightning Bolt', oracle_id: 'bolt-oracle' })) : failure(404)),
+  });
+  const result = await a.call('identifyFrom', {}, { x: 0, y: 0, w: 200, h: 280 }, { exact: false });
+  assert.equal(result.card.name, 'Lightning Bolt');
+  assert.equal(result.text, 'Lightning Bolt');
+  const variants = json(a.eval('NAME_VARIANTS'));
+  assert.equal(variants.length, 6);
+  assert.deepEqual(variants.slice(0, 4).map((v) => v.channel), [undefined, undefined, undefined, undefined], 'modern crops unchanged');
+  assert.deepEqual(variants.slice(4).map((v) => [v.channel, v.invert, v.smooth, v.bin]), [['min', true, 3, false], ['min', true, 3, 'plain']]);
+});
+
+test('grayOf: the darkest channel keeps near-white text bright and makes a colored frame dark', () => {
+  const a = app();
+  const lum = (rgb) => a.call('grayOf', ...rgb), min = (rgb) => a.call('grayOf', ...rgb, 'min');
+  const text = [240, 236, 228], greenFrame = [110, 140, 90];
+  assert.ok(min(text) - min(greenFrame) > lum(text) - lum(greenFrame), 'more contrast between text and a colored frame');
+  assert.equal(min(greenFrame), 90);
+  assert.equal(lum([255, 255, 255]), 255);
+});
+
+test('boxBlur averages a gray channel in place and leaves radius 0 alone', () => {
+  const a = app();
+  // a 3x1 RGBA strip: gray values 0, 90, 0 (in the R slot)
+  const strip = [0, 0, 0, 255, 90, 0, 0, 255, 0, 0, 0, 255];
+  const blurred = json(a.eval(`(() => { const d = new Uint8ClampedArray(${JSON.stringify(strip)}); boxBlur(d, 3, 1, 1); return [...d]; })()`));
+  assert.deepEqual([blurred[0], blurred[4], blurred[8]], [45, 30, 45], 'each pixel is the mean of its in-bounds neighbours');
+  const same = json(a.eval(`(() => { const d = new Uint8ClampedArray(${JSON.stringify(strip)}); boxBlur(d, 3, 1, 0); return [...d]; })()`));
+  assert.deepEqual(same, strip);
+});
+
 test('name lookup caches matches and definitive misses, but retries transient failures', async () => {
   let recover = false;
   const a = app({ route: (url) => {
@@ -292,8 +326,8 @@ test('search ranks an exact match first, appends pages, and shows an empty resul
 test('auto-scan needs consecutive reads and only adds the same card again after a gap', async () => {
   const a = app({
     mediaDevices: { getUserMedia: async () => ({ getVideoTracks: () => [] }) },
-    // A failed read tries four crop variants before the scan loop sees an empty frame.
-    ocr: ['Sol Ring', 'Sol Ring', 'Sol Ring', '', '', '', '', 'Sol Ring', 'Sol Ring'],
+    // A failed read tries all six crop variants (four modern-frame, two old-frame) before the scan loop sees an empty frame.
+    ocr: ['Sol Ring', 'Sol Ring', 'Sol Ring', '', '', '', '', '', '', 'Sol Ring', 'Sol Ring'],
     route: () => ok(card()),
   });
   a.state().settings.exact = false;

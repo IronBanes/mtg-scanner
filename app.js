@@ -375,8 +375,40 @@ function getWorker() {
   return ocrWorkerPromise;
 }
 
-/** Crop a region (fractions of the card rect) from a source into a cleaned-up canvas for OCR. */
-function cropForOcr(src, card, r, targetW = 900, binarize = false, forceInvert = null) {
+/** One gray value per pixel. 'lum' is normal brightness; 'min' is the darkest of R, G and B, which keeps
+    near-white text bright but makes a colored frame dark (old 1993–2003 frames print the name straight onto
+    a mottled colored border, where brightness alone barely separates them). */
+function grayOf(r, g, b, channel = 'lum') {
+  return channel === 'min' ? Math.min(r, g, b) : (r * 0.299 + g * 0.587 + b * 0.114) | 0;
+}
+/** Box blur of a W×H gray array in place (every 4th value of an RGBA array), radius `rad`. Smooths photo
+    grain and frame texture so it doesn't break letters apart before OCR. */
+function boxBlur(d, W, H, rad, step = 4) {
+  if (!(rad > 0)) return;
+  const tmp = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) {
+    let acc = 0, cnt = 0;
+    for (let x = -rad; x < W + rad; x++) {
+      if (x + rad < W) { acc += d[(y * W + x + rad) * step]; cnt++; }
+      if (x - rad - 1 >= 0) { acc -= d[(y * W + x - rad - 1) * step]; cnt--; }
+      if (x >= 0 && x < W) tmp[y * W + x] = acc / cnt;
+    }
+  }
+  for (let x = 0; x < W; x++) {
+    let acc = 0, cnt = 0;
+    for (let y = -rad; y < H + rad; y++) {
+      if (y + rad < H) { acc += tmp[(y + rad) * W + x]; cnt++; }
+      if (y - rad - 1 >= 0) { acc -= tmp[(y - rad - 1) * W + x]; cnt--; }
+      if (y >= 0 && y < H) d[(y * W + x) * step] = Math.round(acc / cnt);
+    }
+  }
+}
+
+/** Crop a region (fractions of the card rect) from a source into a cleaned-up canvas for OCR.
+    binarize: false (gray), true (Otsu, then wipe blobs touching the top/bottom edge), or 'plain' (Otsu only:
+    on a mottled old frame the texture connects the letters to the edges, so the wipe would erase them).
+    channel / smooth: see grayOf() and boxBlur(). */
+function cropForOcr(src, card, r, targetW = 900, binarize = false, forceInvert = null, { channel = 'lum', smooth = 0 } = {}) {
   const sx = card.x + r.x * card.w, sy = card.y + r.y * card.h, sw = r.w * card.w, sh = r.h * card.h;
   const scale = targetW / sw;
   const c = document.createElement('canvas');
@@ -385,11 +417,10 @@ function cropForOcr(src, card, r, targetW = 900, binarize = false, forceInvert =
   g.imageSmoothingQuality = 'high';
   g.drawImage(src, sx, sy, sw, sh, 0, 0, c.width, c.height);
   const im = g.getImageData(0, 0, c.width, c.height), d = im.data;
+  for (let i = 0; i < d.length; i += 4) d[i] = grayOf(d[i], d[i + 1], d[i + 2], channel);
+  boxBlur(d, c.width, c.height, smooth);
   const hist = new Uint32Array(256); let sum = 0;
-  for (let i = 0; i < d.length; i += 4) {
-    const v = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) | 0;
-    d[i] = v; hist[v]++; sum += v;
-  }
+  for (let i = 0; i < d.length; i += 4) { const v = d[i]; hist[v]++; sum += v; }
   const n = d.length / 4, mean = sum / n;
   const pct = (p) => { let acc = 0; for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= n * p) return v; } return 255; };
   const lo = pct(0.02), hi = pct(0.98), span = Math.max(1, hi - lo);
@@ -408,8 +439,9 @@ function cropForOcr(src, card, r, targetW = 900, binarize = false, forceInvert =
       const mB = sB / wB, mF = (sumAll - sB) / wF, between = wB * wF * (mB - mF) ** 2; if (between > best) { best = between; thr = v; } }
     const W = c.width, H = c.height, dark = new Uint8Array(W * H);
     for (let p = 0; p < W * H; p++) dark[p] = d[p * 4] < thr ? 1 : 0;
-    // flood-fill dark regions connected to the top/bottom edges (borders, crowns, frame lines)
+    // flood-fill dark regions connected to the top/bottom edges (borders, crowns, frame lines); 'plain' skips it
     const stack = [];
+    if (binarize !== 'plain') {
     for (let x = 0; x < W; x++) { stack.push(x, (H - 1) * W + x); }
     for (let y = 0; y < H; y++) { stack.push(y * W, y * W + W - 1); }
     while (stack.length) {
@@ -417,6 +449,7 @@ function cropForOcr(src, card, r, targetW = 900, binarize = false, forceInvert =
       const x = p % W;
       if (x > 0) stack.push(p - 1); if (x < W - 1) stack.push(p + 1);
       if (p >= W) stack.push(p - W); if (p < W * (H - 1)) stack.push(p + W);
+    }
     }
     for (let p = 0; p < W * H; p++) { const v = dark[p] ? 0 : 255; d[p * 4] = d[p * 4 + 1] = d[p * 4 + 2] = v; }
   }
@@ -431,6 +464,10 @@ const NAME_VARIANTS = [
   { zone: NAME_ZONE, bin: true },
   { zone: { x: 0.06, y: 0.035, w: 0.74, h: 0.07 }, bin: true },
   { zone: { x: 0.04, y: 0.015, w: 0.78, h: 0.12 }, bin: true },
+  // Old frames (1993–2003): light name text printed straight onto a mottled colored border. Tried only after
+  // the modern-frame crops fail: darkest RGB channel, light text, grain smoothed, tight crop without the border.
+  { zone: { x: 0.06, y: 0.035, w: 0.74, h: 0.07 }, bin: false, invert: true, channel: 'min', smooth: 3 },
+  { zone: { x: 0.06, y: 0.035, w: 0.74, h: 0.07 }, bin: 'plain', invert: true, channel: 'min', smooth: 3 },
 ];
 
 function cleanName(text) {
@@ -459,7 +496,7 @@ async function identifyFrom(src, rect, { exact = state.settings.exact } = {}) {
   // a few crop/cleanup variants; stop at the first one that matches a real card
   for (const v of NAME_VARIANTS) {
     await w.setParameters({ tessedit_pageseg_mode: '6', tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',- " });
-    const { data } = await w.recognize(cropForOcr(src, rect, v.zone, 900, v.bin));
+    const { data } = await w.recognize(cropForOcr(src, rect, v.zone, 900, v.bin, v.invert ?? null, { channel: v.channel, smooth: v.smooth }));
     text = cleanName(data.text);
     if (text.replace(/[^A-Za-z]/g, '').length < 3) continue;
     firstText = firstText || text;
@@ -1387,4 +1424,4 @@ function init() {
 init();
 
 // exposed for testing in the console
-window.__mtg = { cropForOcr, identifyFrom, cleanName, parseSetLine, parseList, toCsv, synergyTags, SYNERGY_RULES, state: () => state };
+window.__mtg = { cropForOcr, grayOf, boxBlur, identifyFrom, cleanName, parseSetLine, parseList, toCsv, synergyTags, SYNERGY_RULES, state: () => state };
