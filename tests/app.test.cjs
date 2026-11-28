@@ -14,7 +14,7 @@ test('loads legacy data with default settings and persists only cards in use', (
     recent: [{ cardId: 'scanned' }],
     decks: [{ id: 'deck', name: 'My deck', cards: [{ cardId: 'decked', qty: 1, board: 'main' }] }],
   })) });
-  assert.deepEqual(json(a.state().settings), { dest: 'none', sound: true, exact: false, searchOwned: false });
+  assert.deepEqual(json(a.state().settings), { dest: 'none', sound: true, exact: false, searchOwned: false, tradeOnly: false });
   a.call('addTo', 'collection', 'owned', false, 2);
   a.flush();
   const data = JSON.parse(a.stored.get(storageKey));
@@ -73,6 +73,23 @@ test('backup restore rejects damaged inputs and can recover a blocked save', asy
   assert.match(a.element('#toast').innerHTML, /card data/);
   await restore({ app: 'mtgscan', ...saved({ recent: [{ cardId: 'sol-ring' }] }) });
   assert.deepEqual(JSON.parse(a.stored.get(storageKey)).recent, [{ cardId: 'sol-ring' }]);
+});
+
+test('review: a backup with a bad trade count is rejected; an import Count is never negative', async () => {
+  const a = app({ raw: '{' });
+  a.element('#settingsBtn').onclick();
+  const restore = async (data) => {
+    await a.element('#bkImport').onchange({ target: { files: [{ text: async () => JSON.stringify(data) }] } });
+    a.flush();
+  };
+  for (const trade of ['<img src=x onerror=alert(1)>', 3, -1, 1.5]) {
+    await restore({ app: 'mtgscan', ...saved({ collection: [{ cardId: 'sol-ring', qty: 2, trade }] }) });
+    assert.equal(a.stored.get(storageKey), '{', 'rejected: ' + trade);
+    assert.match(a.element('#toast').innerHTML, /trade count/);
+  }
+  await restore({ app: 'mtgscan', ...saved({ collection: [{ cardId: 'sol-ring', qty: 2, trade: 2 }] }) });
+  assert.equal(JSON.parse(a.stored.get(storageKey)).collection[0].trade, 2, 'a valid trade count restores');
+  assert.deepEqual(json(a.call('parseList', 'Count,Name\n-1,Sol Ring\n0,Opt')).map((x) => x.qty), [1, 1]);
 });
 
 test('scan-only logs price checks; bulk add counts each scan once', () => {
@@ -738,4 +755,265 @@ test('slim() saves tags on every card (empty when none), and SYNERGY_RULES cover
   for (const rule of Object.values(rules)) {
     for (const key of ['name', 'thing', 'desc', 'make', 'pay', 'makeKw', 'payKw']) assert.ok(key in rule, 'theme rule has ' + key);
   }
+});
+
+// ---------------------------------------------------------------- trade binder (release 9)
+test('setTrade clamps to 0..qty, deletes the key at 0, and ignores missing entries', () => {
+  const a = app();
+  a.call('cache', card());
+  a.call('addTo', 'collection', 'sol-ring', false, 2);
+  a.call('setTrade', 'sol-ring', false, 5);
+  assert.equal(a.state().collection[0].trade, 2, 'clamped up to qty');
+  a.call('setTrade', 'sol-ring', false, -3);
+  assert.ok(!('trade' in a.state().collection[0]), 'below 0 is 0, and 0 drops the key');
+  a.call('setTrade', 'sol-ring', false, 1);
+  a.call('setTrade', 'sol-ring', false, 0);
+  assert.ok(!('trade' in a.state().collection[0]), '0 drops the key');
+  a.call('setTrade', 'unknown-card', false, 3); // no such entry: nothing happens
+  a.call('setTrade', 'sol-ring', true, 3);      // no foil entry either
+  assert.equal(a.state().collection.length, 1);
+  assert.ok(!('trade' in a.state().collection[0]), 'a missing entry gains no trade key');
+});
+
+test('lowering qty clamps trade; the last copy drops the entry and its trade count', () => {
+  const a = app();
+  a.call('cache', card());
+  a.call('addTo', 'collection', 'sol-ring', false, 3);
+  a.call('setTrade', 'sol-ring', false, 2);
+  a.call('removeFrom', 'collection', 'sol-ring', false, 1); // the qty − button path: 3 → 2
+  assert.equal(a.state().collection[0].qty, 2);
+  assert.equal(a.state().collection[0].trade, 2, 'trade fits the new qty unchanged');
+  a.call('removeFrom', 'collection', 'sol-ring', false, 1); // 2 → 1: trade clamps to 1
+  assert.equal(a.state().collection[0].qty, 1);
+  assert.equal(a.state().collection[0].trade, 1);
+  a.call('removeFrom', 'collection', 'sol-ring', false, 1); // the last copy: the entry goes
+  assert.deepEqual(json(a.state().collection), []);
+});
+
+test('scan undo clamps the trade count along with qty', () => {
+  const a = app();
+  const c = a.call('cache', card());
+  a.state().settings.dest = 'collection';
+  a.call('addTo', 'collection', c.id, false, 2);
+  a.call('setTrade', c.id, false, 2);
+  a.call('addScanned', c);             // qty 3
+  a.call('setTrade', c.id, false, 3);  // all three marked
+  a.element('button').onclick();       // Undo
+  const e = a.state().collection[0];
+  assert.equal(e.qty, 2);
+  assert.equal(e.trade, 2, 'undo lowers qty, trade clamps with it');
+  assert.equal(a.state().recent.length, 0);
+});
+
+test('tradeOnly filters the list to trade entries and swaps in the trade stat tiles', () => {
+  const a = app();
+  a.call('cache', card());
+  a.call('cache', card('island', { name: 'Island', oracle_id: 'island-oracle', prices: { usd: '0.25', usd_foil: '0.50' } }));
+  a.call('addTo', 'collection', 'sol-ring', false, 2);
+  a.call('addTo', 'collection', 'sol-ring', true, 1);
+  a.call('addTo', 'collection', 'island', false, 4);
+  a.call('setTrade', 'sol-ring', false, 1);
+  a.call('setTrade', 'sol-ring', true, 1);
+  const ids = () => [...a.element('#collList').innerHTML.matchAll(/data-id="([^"]+)"/g)].map((m) => m[1]);
+  a.call('renderCollection');
+  assert.match(a.element('#collStats').innerHTML, /Total value/, 'usual tiles with the toggle off');
+  assert.ok(a.element('#tradeCopy').classList.contains('hidden'), 'share buttons hidden');
+  assert.deepEqual(ids(), ['island', 'sol-ring', 'sol-ring']); // recent sort: newest first
+  a.state().settings.tradeOnly = true;
+  a.call('renderCollection');
+  assert.deepEqual(ids(), ['sol-ring', 'sol-ring'], 'only entries with trade > 0');
+  assert.ok(!a.element('#tradeCopy').classList.contains('hidden') && !a.element('#tradeCsv').classList.contains('hidden'));
+  const stats = a.element('#collStats').innerHTML;
+  assert.match(stats, /Trade value/);
+  // 1 normal ($2.50) + 1 foil ($5.00): $7.50, 2 copies, 1 identity
+  assert.match(stats, /<b>\$7\.50<\/b><span>Trade value/);
+  assert.match(stats, /<b>2<\/b><span>For trade/);
+  assert.match(stats, /<b>1<\/b><span>Unique/);
+  // the filter still applies in trade view
+  a.element('#collFilter').value = 'island';
+  a.call('renderCollection');
+  // review: cards ARE marked for trade, the filter just hides them
+  assert.match(a.element('#collList').innerHTML, /Nothing matches\./);
+  a.element('#collFilter').value = 'sol';
+  a.call('renderCollection');
+  assert.deepEqual(ids(), ['sol-ring', 'sol-ring']);
+});
+
+test('tradeOnly with nothing marked shows the trade empty state, and off restores the list', () => {
+  const a = app();
+  a.call('cache', card());
+  a.call('addTo', 'collection', 'sol-ring', false, 2);
+  a.state().settings.tradeOnly = true;
+  a.call('renderCollection');
+  assert.match(a.element('#collList').innerHTML, /Nothing marked for trade yet\. Open a card you own and set how many to trade\./);
+  a.state().settings.tradeOnly = false;
+  a.call('renderCollection');
+  assert.match(a.element('#collList').innerHTML, /data-id="sol-ring"/);
+});
+
+test('the For-trade-only toggle saves the setting, re-renders and stays in sync', () => {
+  const a = app();
+  a.call('cache', card());
+  a.call('addTo', 'collection', 'sol-ring', false, 2);
+  a.call('setTrade', 'sol-ring', false, 1);
+  a.element('#tradeOnly').checked = true;
+  a.element('#tradeOnly').onchange({ target: { checked: true } });
+  assert.ok(a.state().settings.tradeOnly);
+  a.flush();
+  assert.equal(JSON.parse(a.stored.get(storageKey)).settings.tradeOnly, true, 'the setting persists');
+  assert.match(a.element('#collStats').innerHTML, /For trade/, 'the tiles re-render');
+  a.element('#tradeOnly').onchange({ target: { checked: false } });
+  assert.ok(!a.state().settings.tradeOnly);
+  assert.match(a.element('#collStats').innerHTML, /Total value/);
+  // a restored state syncs the checkbox on the next render, like #searchOwned
+  a.state().settings.tradeOnly = true;
+  a.call('renderAll');
+  assert.equal(a.element('#tradeOnly').checked, true);
+});
+
+test('the trade value tile keeps the price-change line, computed from trade copies', () => {
+  const a = app();
+  a.call('cache', card('up', { oracle_id: 'up-oracle', name: 'Up', prices: { usd: '2.50', usd_foil: '5.00' } }));
+  a.call('cache', card('up', { oracle_id: 'up-oracle', name: 'Up', prices: { usd: '3.50', usd_foil: '5.00' } })); // +1.00 normal
+  a.call('addTo', 'collection', 'up', false, 3);
+  a.call('setTrade', 'up', false, 2);
+  a.state().settings.tradeOnly = true;
+  a.call('renderCollection');
+  // 2 trade copies × +1.00 = +2.00, not the 3 owned copies' +3.00
+  assert.match(a.element('#collStats').innerHTML, /<span class="chg up">▲ \$2\.00<\/span>/);
+  assert.match(a.element('#collStats').innerHTML, /Trade value/);
+});
+
+test('collection rows badge the trade count by the card name', () => {
+  const a = app();
+  a.call('cache', card());
+  a.call('addTo', 'collection', 'sol-ring', false, 2);
+  a.call('addTo', 'collection', 'sol-ring', true, 1);
+  a.call('setTrade', 'sol-ring', true, 1);
+  a.call('renderCollection');
+  const html = a.element('#collList').innerHTML;
+  // review: a badge on the name line, since the grey set line is truncated on phones and hid it
+  assert.match(html, /<div class="n">Sol Ring<span class="badge foil">FOIL<\/span> <span class="badge trade" title="1 for trade">⇄ 1<\/span><\/div>/, 'the marked entry is badged');
+  assert.equal((html.match(/class="badge trade"/g) || []).length, 1, 'the unmarked entry is not');
+});
+
+test('the card popup stepper marks copies for trade without closing the popup', async () => {
+  const num = () => ({ textContent: '' });
+  const normal = num(), foil = num();
+  const step = (trade, f, n) => ({ dataset: { trade: String(trade), foil: f ? '1' : '0' }, parentElement: { querySelector: () => n } });
+  const buttons = [step(-1, false, normal), step(1, false, normal), step(-1, true, foil), step(1, true, foil)];
+  const a = app({ route: () => ok(card()), all: { '[data-trade]': buttons } });
+  a.call('cache', card());
+  a.call('addTo', 'collection', 'sol-ring', false, 2);
+  a.call('addTo', 'collection', 'sol-ring', true, 1);
+  await a.call('openCard', 'sol-ring');
+  const modal = () => a.element('#modalBody').innerHTML;
+  assert.match(modal(), /For trade/);
+  assert.ok(modal().includes('own 2') && modal().includes('own 1'), 'one row per owned finish');
+  assert.ok(modal().includes('data-trade="-1"') && modal().includes('data-trade="1"'), 'a −/+ stepper per row');
+  const entry = (f) => a.state().collection.find((e) => !!e.foil === f);
+  buttons[1].onclick(); // + normal → 1
+  assert.equal(entry(false).trade, 1);
+  assert.equal(normal.textContent, 1, 'the number updates in place');
+  assert.match(modal(), /<h2>Sol Ring<\/h2>/, 'the popup stays open');
+  assert.match(a.element('#collList').innerHTML, /title="1 for trade">⇄ 1</, 'renderAll refreshed the list behind it');
+  buttons[1].onclick(); // + normal → 2
+  buttons[1].onclick(); // + normal → clamped at qty 2
+  assert.equal(entry(false).trade, 2);
+  buttons[0].onclick(); // − normal → 1
+  buttons[0].onclick(); // − normal → 0: key dropped
+  assert.ok(!('trade' in entry(false)));
+  buttons[3].onclick(); // + foil → 1
+  buttons[3].onclick(); // + foil → clamped at qty 1
+  assert.equal(entry(true).trade, 1);
+  buttons[2].onclick(); // − foil → 0
+  assert.ok(!('trade' in entry(true)));
+});
+
+test('a printing you do not own shows no For-trade block in the popup', async () => {
+  const a = app({ route: (url) => ok(url.pathname === '/cards/other' ? card('other') : card()) });
+  a.call('cache', card());
+  a.call('addTo', 'collection', 'sol-ring', false, 1);
+  await a.call('openCard', 'other'); // same card, different (unowned) printing
+  assert.match(a.element('#modalBody').innerHTML, /<h2>Sol Ring<\/h2>/);
+  assert.ok(!a.element('#modalBody').innerHTML.includes('For trade'), 'no empty block');
+  assert.ok(!a.element('#modalBody').innerHTML.includes('data-trade'));
+});
+
+test('tradeText and the trade CSV put one line per trade entry, Count = trade', () => {
+  const a = app();
+  a.call('cache', card('signet', { name: 'Arcane Signet', oracle_id: 'signet-oracle', prices: { usd: '2.25', usd_foil: '4.00' } }));
+  a.call('cache', card());
+  a.call('addTo', 'collection', 'sol-ring', true, 2);
+  a.call('addTo', 'collection', 'signet', false, 3);
+  a.call('setTrade', 'sol-ring', true, 1);
+  a.call('setTrade', 'signet', false, 2);
+  assert.equal(a.call('tradeText'), '2 Arcane Signet (C21) 263\n1 Sol Ring (C21) 263 *F*\n\nTotal: $9.50');
+  // the button maps entries the same way: Count is the trade count, columns unchanged
+  const csv = a.call('toCsv', a.call('tradeEntries').map((e) => ({ cardId: e.cardId, foil: e.foil, qty: e.trade })));
+  const [head, signetRow, solRow] = csv.split('\r\n');
+  assert.equal(head, 'Count,Name,Edition,Set Code,Collector Number,Foil,Board,Rarity,Type,Price (USD),Total (USD),Scryfall ID');
+  assert.equal(signetRow, '2,Arcane Signet,Commander 2021,C21,263,,,uncommon,Artifact,2.25,4.50,signet');
+  assert.equal(solRow, '1,Sol Ring,Commander 2021,C21,263,foil,,uncommon,Artifact,5.00,5.00,sol-ring');
+  // the full collection CSV is unchanged: Count is owned qty, no trade column
+  const [, foilRow, plainRow] = a.call('toCsv', a.state().collection).split('\r\n');
+  assert.equal(foilRow, '2,Sol Ring,Commander 2021,C21,263,foil,,uncommon,Artifact,5.00,10.00,sol-ring');
+  assert.equal(plainRow, '3,Arcane Signet,Commander 2021,C21,263,,,uncommon,Artifact,2.25,6.75,signet');
+});
+
+test('#tradeCopy copies the trade list as text', async () => {
+  const a = app();
+  a.call('cache', card());
+  a.call('addTo', 'collection', 'sol-ring', false, 2);
+  a.call('setTrade', 'sol-ring', false, 2);
+  a.eval('navigator.clipboard = { writeText: async (t) => { __copied = t; } }');
+  a.element('#tradeCopy').onclick();
+  assert.equal(a.eval('__copied'), '2 Sol Ring (C21) 263\n\nTotal: $5.00');
+});
+
+test('copies marked for trade still count as owned everywhere', () => {
+  const a = app();
+  a.call('cache', card());
+  a.call('addTo', 'collection', 'sol-ring', false, 2);
+  a.call('setTrade', 'sol-ring', false, 2); // every copy marked
+  assert.equal(a.call('ownedCount', 'sol-ring-oracle'), 2);
+  assert.equal(a.call('collectionTotals').cards, 2);
+  const d = a.call('createDeck', 'Wants');
+  a.call('addTo', d.id, 'sol-ring', false, 2);
+  assert.deepEqual(json(a.call('shoppingList', d)), [], 'the shopping list sees them as owned');
+  a.call('showShoppingList', d);
+  assert.match(a.element('#modalBody').innerHTML, /You own every card in this deck/);
+});
+
+test('a legacy save with no trade and no tradeOnly loads, renders and saves without trade keys', () => {
+  const legacy = JSON.stringify(saved({
+    cards: { 'sol-ring': { id: 'sol-ring', name: 'Sol Ring', oracle_id: 'sol-ring-oracle', set: 'c21', cn: '263', prices: { usd: '2.50', usd_foil: '5.00' }, updated: 1 } },
+    collection: [{ cardId: 'sol-ring', qty: 2, foil: false, added: 1 }],
+    decks: [{ id: 'deck', name: 'Old deck', format: 'commander', created: 1, cards: [{ cardId: 'sol-ring', qty: 1, foil: false, board: 'main' }] }],
+    recent: [{ cardId: 'sol-ring', foil: false, t: 1 }],
+  }));
+  const a = app({ raw: legacy });
+  assert.equal(a.state().schema, 1);
+  assert.ok(!a.state().settings.tradeOnly, 'tradeOnly defaults off');
+  a.call('renderAll');
+  assert.match(a.element('#collStats').innerHTML, /Total value/);
+  assert.ok(a.element('#tradeCopy').classList.contains('hidden'), 'the trade buttons stay hidden');
+  a.call('addTo', 'collection', 'sol-ring', false, 1);
+  a.flush();
+  const data = JSON.parse(a.stored.get(storageKey));
+  assert.equal(data.schema, 1);
+  assert.deepEqual(data.collection, [{ cardId: 'sol-ring', qty: 3, foil: false, added: 1 }]);
+  assert.ok(!('trade' in data.collection[0]), 'no trade key appears on old entries');
+  // a save that already has trade and tradeOnly loads and works (additive fields, same schema)
+  const b = app({ raw: JSON.stringify(saved({
+    cards: { 'sol-ring': { id: 'sol-ring', name: 'Sol Ring', oracle_id: 'sol-ring-oracle', set: 'c21', cn: '263', prices: { usd: '2.50', usd_foil: '5.00' }, updated: 1 } },
+    collection: [{ cardId: 'sol-ring', qty: 2, foil: false, added: 1, trade: 2 }],
+    settings: { dest: 'none', sound: true, exact: true, searchOwned: false, tradeOnly: true },
+  })) });
+  assert.equal(b.state().collection[0].trade, 2);
+  assert.ok(b.state().settings.tradeOnly);
+  b.call('renderAll');
+  assert.equal(b.element('#tradeOnly').checked, true);
+  assert.match(b.element('#collStats').innerHTML, /Trade value/);
+  assert.match(b.element('#collStats').innerHTML, /<b>\$5\.00<\/b>/, '2 × $2.50 marked for trade');
 });
