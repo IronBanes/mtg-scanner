@@ -1000,7 +1000,7 @@ function tradeHtml(c) {
 }
 
 // ---------------------------------------------------------------- card detail
-async function openCard(cardId, { afterAdd, defaultDest } = {}) {
+async function openCard(cardId, { afterAdd, defaultDest, printFilter } = {}) {
   const my = ++modalSeq; // a newer openCard or closing the popup makes this load stale
   let c = state.cards[cardId];
   showModal(`<p class="muted">Loading…</p>`);
@@ -1056,46 +1056,67 @@ async function openCard(cardId, { afterAdd, defaultDest } = {}) {
     b.parentElement.querySelector('b').textContent = e.trade || 0;
     renderAll();
   }));
-  $('#printSel').onchange = () => { const id = $('#printSel').value; openCard(id, { afterAdd, defaultDest: destSel.value }); };
-  // load printings: every page (basic lands have over a thousand), redrawing the list as pages arrive
+  // picking a printing reopens the popup on it; the filter text carries over so you can compare the next one
+  $('#printSel').onchange = () => { const id = $('#printSel').value; if (id) openCard(id, { afterAdd, defaultDest: destSel.value, printFilter: $('#printFilter').value }); };
+  // load printings: every page (basic lands have over a thousand), redrawing the list as pages arrive.
+  // A complete list is kept for the session per card, so picking another printing doesn't load it all again.
   if (c.prints_uri) {
-    const prints = [];
-    const draw = () => { const sel = $('#printSel'); if (sel && my === modalSeq) renderPrintings(prints, c.id); };
-    $('#printFilter').oninput = draw;
+    const key = c.oracle_id || c.id, cached = printsCache.get(key);
+    const entry = cached || { list: [], done: false, failed: false };
+    let timer;
+    const draw = () => { if (my === modalSeq && $('#printSel') && $('#printFilter')) renderPrintings(entry, c.id); };
+    if (printFilter) $('#printFilter').value = printFilter;
+    $('#printFilter').oninput = () => { clearTimeout(timer); timer = setTimeout(draw, 120); }; // not every keystroke
+    draw();
+    if (cached) return;
     try {
       let url = c.prints_uri;
-      while (url && prints.length < 3000) {
-        const r = await sf(url); if (my !== modalSeq) return;
+      while (url && entry.list.length < 3000) {
+        const r = await sf(url); if (my !== modalSeq) return; // popup closed or replaced: stop loading
         // hide digital-only versions, but always keep the one currently shown
-        prints.push(...r.data.filter((p) => !p.digital || p.id === c.id)); url = r.has_more ? r.next_page : null;
-        r.data.forEach((p) => (state.cards[p.id] ? Object.assign(state.cards[p.id], slim(p)) : (state.cards[p.id] = slim(p))));
+        entry.list.push(...r.data.filter((p) => !p.digital || p.id === c.id)); url = r.has_more ? r.next_page : null;
+        // cache new printings only: overwriting a cached card here would skip price-change tracking (cache())
+        r.data.forEach((p) => { if (!state.cards[p.id]) state.cards[p.id] = slim(p); });
         draw();
       }
+      entry.done = true; printsCache.set(key, entry);
       save();
-    } catch {}
+    } catch { entry.failed = true; }
+    draw();
   }
 }
-/** Does a printing match every word of the filter? Words are matched against its set name, set code,
-    collector number and year ("onslaught", "ons", "347", "2002", "ons 347"). */
+const printsCache = new Map(); // oracle_id -> { list, done } of a card's printings, complete lists only, per session
+/** Does a printing match every word of the filter? Words are matched against its set name and set code;
+    a number must be the collector number or the year exactly ("onslaught", "ons 347", "#347", "2002"). */
 function printMatches(p, q) {
-  const hay = `${p.set_name} ${p.set} #${p.collector_number} ${(p.released_at || '').slice(0, 4)}`.toLowerCase();
-  return String(q).toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.includes(w.replace(/^#/, '')));
+  const text = `${p.set_name} ${p.set}`.toLowerCase(), cn = String(p.collector_number || '').toLowerCase().replace(/^0+/, '');
+  const year = (p.released_at || '').slice(0, 4);
+  return String(q).toLowerCase().split(/\s+/).map((w) => w.replace(/^#/, '')).filter(Boolean)
+    .every((w) => (/^\d+$/.test(w) ? w.replace(/^0+/, '') === cn || w === year : text.includes(w)));
 }
-/** Fill the printing list from the loaded printings, filtered by #printFilter. When the shown printing isn't
-    in the results, a "pick one" row is selected, so the popup never shows one printing and adds another. */
-function renderPrintings(prints, currentId) {
+/** Fill the printing list from the loaded printings, filtered by #printFilter. The printing shown in the popup
+    stays selected until you pick another: while pages load it's kept at the top even if not loaded yet, and
+    when a filter hides it a "pick one" row is selected, so the popup never shows one printing and adds another. */
+function renderPrintings(entry, currentId) {
   const sel = $('#printSel'), q = ($('#printFilter').value || '').trim();
-  const shown = q ? prints.filter((p) => printMatches(p, q)) : prints;
+  if (typeof document !== 'undefined' && document.activeElement === sel) return; // the list is open: don't yank it
+  const list = entry.list, shown = q ? list.filter((p) => printMatches(p, q)) : list;
   const opt = (p) => {
-    const s = state.cards[p.id];
+    const s = state.cards[p.id]; if (!s) return '';
     const pr = s.prices.usd ? money(s.prices.usd) : s.prices.usd_foil ? money(s.prices.usd_foil) + ' foil' : 'no price';
     const year = (p.released_at || '').slice(0, 4);
     return `<option value="${esc(p.id)}" ${p.id === currentId ? 'selected' : ''}>${esc(s.set_name)} (${esc(s.set.toUpperCase())}) #${esc(s.cn)}${year ? ' · ' + esc(year) : ''} — ${pr}</option>`;
   };
-  const pick = q && !shown.some((p) => p.id === currentId)
-    ? `<option value="" selected disabled>${shown.length ? `Pick a printing (${shown.length} found)` : 'No printing matches'}</option>` : '';
-  sel.innerHTML = pick + shown.map(opt).join('');
-  $('#printCount').textContent = q ? `${shown.length} of ${prints.length}` : `${prints.length} printing${prints.length === 1 ? '' : 's'}`;
+  const loading = !entry.done && !entry.failed;
+  let head = '';
+  if (q && !shown.some((p) => p.id === currentId)) {
+    head = `<option value="" selected disabled>${shown.length ? `Pick a printing (${shown.length} found)` : loading ? 'No match yet — still loading' : 'No printing matches'}</option>`;
+  } else if (!q && !list.some((p) => p.id === currentId)) {
+    head = opt({ id: currentId }); // the shown printing isn't on a loaded page yet: keep it selected
+  }
+  sel.innerHTML = head + shown.map(opt).join('');
+  const n = list.length, tail = loading ? ' — loading…' : entry.failed ? ' — couldn’t load them all' : '';
+  const count = $('#printCount'); if (count) count.textContent = (q ? `${shown.length} of ${n}` : `${n} printing${n === 1 ? '' : 's'}`) + tail;
 }
 
 // ---------------------------------------------------------------- collection
